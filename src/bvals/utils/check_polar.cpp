@@ -44,13 +44,14 @@ void BoundaryValues::CheckPolarBoundaries() {
   }
   // Check that AMR is disabled (SMR is ok)
   if (pmy_mesh_->multilevel) {
-    if (pmy_mesh_->adaptive) {
-      std::stringstream msg;
-      msg << "### FATAL ERROR in BoundaryValues constructor" << std::endl
-          << "The use of AMR with any 'polar' or 'polar_wedge' boundary \n"
-          << "flags is currently unsupported" << std::endl;
-      ATHENA_ERROR(msg);
-    }
+    // //XS: comment out to enable AMR for now, in refinement condition, avoid polar
+    //if (pmy_mesh_->adaptive) {
+   //   std::stringstream msg;
+   //   msg << "### FATAL ERROR in BoundaryValues constructor" << std::endl
+   //       << "The use of AMR with any 'polar' or 'polar_wedge' boundary \n"
+   //       << "flags is currently unsupported" << std::endl;
+   //   ATHENA_ERROR(msg);
+   // }
   }
 
   // Mesh must extend from 0.0 to PI (exactly) along the polar x2 dimension

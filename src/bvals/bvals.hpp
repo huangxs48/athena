@@ -81,6 +81,8 @@ class BoundaryBase {
 
   void SearchAndSetNeighbors(MeshBlockTree &tree, int *ranklist, int *nslist);
 
+  //bool get_apply_bndry_fn_flag(BoundaryFace dir_flag);
+
  protected:
   // 1D refined or unrefined=2
   // 2D refined=12, unrefined=8
@@ -162,6 +164,8 @@ class BoundaryValues : public BoundaryBase, //public BoundaryPhysics,
   void CheckUserBoundaries();
 
   int AdvanceCounterPhysID(int num_phys);
+
+  bool get_apply_bndry_fn_flag(BoundaryFace dir_flag);
 
  private:
   MeshBlock *pmy_block_;      // ptr to MeshBlock containing this BoundaryValues

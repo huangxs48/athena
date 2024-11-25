@@ -1217,6 +1217,13 @@ void Mesh::EnrollUserBoundaryFunction(int dir, BValFunc my_bc) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void Mesh::get_current_level()
+//! \brief Return current mesh block level
+int Mesh::get_current_level(){
+  return root_level;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void Mesh::EnrollUserMGGravityBoundaryFunction(BoundaryFace dir,
 //!                                                    MGBoundaryFunc my_bc)
 //! \brief Enroll a user-defined Multigrid gravity boundary function

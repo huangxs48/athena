@@ -380,6 +380,11 @@ void BoundaryValues::CheckUserBoundaries() {
   return;
 }
 
+//
+bool BoundaryValues::get_apply_bndry_fn_flag(BoundaryFace dir_flag){
+   return apply_bndry_fn_[dir_flag];
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn void BoundaryValues::StartReceivingSubset(BoundaryCommSubset phase,
 //!                                std::vector<BoundaryVariable *> bvars_subset)
