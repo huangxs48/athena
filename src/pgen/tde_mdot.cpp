@@ -63,7 +63,7 @@ static int n_rho = 140;
 static int n_tem = 70;
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
-bool replace_low_dens_ff;
+int replace_low_dens_ff;
 Real rho_cut_ff; 
 
 //refinement
@@ -101,11 +101,9 @@ void GeneralNewtonianPotential(MeshBlock *pmb, const Real time, const Real dt, c
                               const AthenaArray<Real> &prim_scalar, const AthenaArray<Real> &bcc,
 			      AthenaArray<Real> &cons, AthenaArray<Real> &cons_scalar);
 
-void opacity(MeshBlock *pmb, AthenaArray<Real> &prim);
-void opalopacity(MeshBlock *pmb, AthenaArray<Real> &prim);
-Real kappa_ff(Real temp, Real rho);
-void rossopacity(const Real rho, const Real tgas, Real &kappa, Real &kappa_planck);
-
+Real kappa_ff_planck(Real temp, Real rho);
+Real kappa_ff_ross(Real temp, Real rho);
+Real kappa_ff_nu(Real nu, Real temp, Real rho);
 
 //user history 
 Real massflux_AInj_x1(MeshBlock *pmb, int iout);
@@ -168,6 +166,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   tfloor = pin->GetOrAddReal("radiation", "tfloor", 0.001);
   dfloor = pin->GetOrAddReal("hydro", "dfloor", 0.001);
   pfloor = pin->GetOrAddReal("hydro", "pfloor", 0.001);
+
+  //opacity flags
+  replace_low_dens_ff = GetOrAddInteger("problem", "replace_low_dens_ff", 0);
+  rho_cut_ff = GetOrAddReal("problem", "rho_cut_ff", 1.0e-7);  
 
   user_dt = pin->GetOrAddReal("problem", "user_dt", 1.0e-6);
   //Initialize the injection point
@@ -260,88 +262,88 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x1, RadOuterX1);
     }
 
-    //opacity tables
-    opacitytable.NewAthenaArray(212,46);
-    planckopacity.NewAthenaArray(138,37);
-    logttable.NewAthenaArray(212);
-    logrhottable.NewAthenaArray(46);
-    logttable_planck.NewAthenaArray(138);
-    logrhottable_planck.NewAthenaArray(37);
+    // //opacity tables
+    // opacitytable.NewAthenaArray(212,46);
+    // planckopacity.NewAthenaArray(138,37);
+    // logttable.NewAthenaArray(212);
+    // logrhottable.NewAthenaArray(46);
+    // logttable_planck.NewAthenaArray(138);
+    // logrhottable_planck.NewAthenaArray(37);
     
-    // read in the opacity table
-    FILE *fkappa, *flogt, *flogrhot, *fplanck, *flogt_planck, *flogrhot_planck;
+    // // read in the opacity table
+    // FILE *fkappa, *flogt, *flogrhot, *fplanck, *flogt_planck, *flogrhot_planck;
       
-    if ( (fkappa=fopen("./aveopacity_combined.txt","r"))==NULL )
-    {
-      printf("Open input file error aveopacity_combined");
-      return;
-    }
+    // if ( (fkappa=fopen("./aveopacity_combined.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error aveopacity_combined");
+    //   return;
+    // }
 
-    if ( (fplanck=fopen("./PlanckOpacity.txt","r"))==NULL )
-    {
-      printf("Open input file error PlanckOpacity");
-      return;
-    }
+    // if ( (fplanck=fopen("./PlanckOpacity.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error PlanckOpacity");
+    //   return;
+    // }
 
-    if ( (flogt=fopen("./logT.txt","r"))==NULL )
-    {
-      printf("Open input file error logT");
-      return;
-    }
+    // if ( (flogt=fopen("./logT.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error logT");
+    //   return;
+    // }
 
-    if ( (flogrhot=fopen("./logRhoT.txt","r"))==NULL )
-    {
-      printf("Open input file error logRhoT");
-      return;
-    }
+    // if ( (flogrhot=fopen("./logRhoT.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error logRhoT");
+    //   return;
+    // }
 
-    if ( (flogt_planck=fopen("./logT_planck.txt","r"))==NULL )
-    {
-      printf("Open input file error logT_planck");
-      return;
-    }
+    // if ( (flogt_planck=fopen("./logT_planck.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error logT_planck");
+    //   return;
+    // }
 
-    if ( (flogrhot_planck=fopen("./logRhoT_planck.txt","r"))==NULL )
-    {
-      printf("Open input file error logRhoT_planck");
-      return;
-    }
+    // if ( (flogrhot_planck=fopen("./logRhoT_planck.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error logRhoT_planck");
+    //   return;
+    // }
 
-    for(int j=0; j<212; j++){
-      for(int i=0; i<46; i++){
-          fscanf(fkappa,"%lf",&(opacitytable(j,i)));
-      }
-    }
+    // for(int j=0; j<212; j++){
+    //   for(int i=0; i<46; i++){
+    //       fscanf(fkappa,"%lf",&(opacitytable(j,i)));
+    //   }
+    // }
 
-    for(int j=0; j<138; j++){
-      for(int i=0; i<37; i++){
-          fscanf(fplanck,"%lf",&(planckopacity(j,i)));
-      }
-     }
+    // for(int j=0; j<138; j++){
+    //   for(int i=0; i<37; i++){
+    //       fscanf(fplanck,"%lf",&(planckopacity(j,i)));
+    //   }
+    //  }
 
 
-    for(int i=0; i<46; i++){
-      fscanf(flogrhot,"%lf",&(logrhottable(i)));
-    }
+    // for(int i=0; i<46; i++){
+    //   fscanf(flogrhot,"%lf",&(logrhottable(i)));
+    // }
 
-    for(int i=0; i<212; i++){
-      fscanf(flogt,"%lf",&(logttable(i)));
-    }
+    // for(int i=0; i<212; i++){
+    //   fscanf(flogt,"%lf",&(logttable(i)));
+    // }
 
-    for(int i=0; i<37; i++){
-      fscanf(flogrhot_planck,"%lf",&(logrhottable_planck(i)));
-    }
+    // for(int i=0; i<37; i++){
+    //   fscanf(flogrhot_planck,"%lf",&(logrhottable_planck(i)));
+    // }
 
-    for(int i=0; i<138; i++){
-      fscanf(flogt_planck,"%lf",&(logttable_planck(i)));
-    }
+    // for(int i=0; i<138; i++){
+    //   fscanf(flogt_planck,"%lf",&(logttable_planck(i)));
+    // }
 
-    fclose(fkappa);
-    fclose(flogt);
-    fclose(flogrhot);
-    fclose(fplanck);
-    fclose(flogt_planck);
-    fclose(flogrhot_planck);
+    // fclose(fkappa);
+    // fclose(flogt);
+    // fclose(flogrhot);
+    // fclose(fplanck);
+    // fclose(flogt_planck);
+    // fclose(flogrhot_planck);
 
 
     //load combined opacity
@@ -823,35 +825,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         phydro->u(IM3,k,j,i) = 0.0;
 
 	if (NR_RADIATION_ENABLED){
-	  // // electron scattering opacity
-	  // Real kappa_es = 0.2 * (1.0 + 0.6);
-	  // Real kappaa = 0.0;
-	  // Real rho = phydro->w(IDN,k,j,i);
-	  // Real temp = std::max(phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i), tfloor);
-	  // Real kappa, kappa_planck;
-	  // //rossopacity(rho, temp, kappa, kappa_planck);
-	
-	  // if(kappa < kappa_es){
-	  //   if(temp < 0.14){
-	  //     kappaa = kappa;
-	  //     kappa = 0.0;
-	  //   }else{
-	  //     kappaa = 0.0;
-	  //   }
-	  // }else{
-	  //   kappaa = kappa - kappa_es;
-	  //   kappa = kappa_es;
-	  // }
-	  // //one frequency
-	  // pnrrad->sigma_s(k,j,i,0) = kappa * rho * rho_unit * l_unit; //scatter
-	  // pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //Rossland mean
-	  // pnrrad->sigma_ae(k,j,i,0) = pnrrad->sigma_a(k,j,i,0); //Rossland mean
-	  // //Planck mean - Rossland mean
-	  // if(kappaa < kappa_planck){
-	  //   pnrrad->sigma_planck(k,j,i,0) = (kappa_planck-kappaa)*rho*rho_unit*l_unit;
-	  // }else{
-	  //   pnrrad->sigma_planck(k,j,i,0) = 0.0;
-	  // }
 
 	  Real rho = phydro->w(IDN,k,j,i);
 	  Real temp = phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
@@ -1520,148 +1493,6 @@ void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 }
 
 
-//input code unit, output code unit
-Real kappa_ff(Real temp, Real rho){
-  Real rho_cgs = rho*rho_unit;
-  Real temp_cgs =  temp*temp_unit;
-  Real kappa_cgs = 2.86e-5*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
-
-  return kappa_cgs/kappa_unit;
-}
-
-void rossopacity(const Real rho, const Real tgas, Real &kappa, Real &kappa_planck)
-{
-  
-    
-    Real logt = log10(tgas * temp_unit);
-    Real logrhot = log10(rho* rho_unit) - 3.0* logt + 18.0;
-    int nrhot1_planck = 0;
-    int nrhot2_planck = 0;
-    
-    int nrhot1 = 0;
-    int nrhot2 = 0;
-
-    while((logrhot > logrhottable_planck(nrhot2_planck)) && (nrhot2_planck < 36)){
-      nrhot1_planck = nrhot2_planck;
-      nrhot2_planck++;
-    }
-    if(nrhot2_planck==36 && (logrhot > logrhottable_planck(nrhot2_planck)))
-      nrhot1_planck=nrhot2_planck;
-
-    while((logrhot > logrhottable(nrhot2)) && (nrhot2 < 45)){
-      nrhot1 = nrhot2;
-      nrhot2++;
-    }
-    if(nrhot2==45 && (logrhot > logrhottable(nrhot2)))
-      nrhot1=nrhot2;
-  
-  /* The data point should between NrhoT1 and NrhoT2 */
-    int nt1_planck = 0;
-    int nt2_planck = 0;
-    int nt1 = 0;
-    int nt2 = 0;
-    while((logt > logttable_planck(nt2_planck)) && (nt2_planck < 137)){
-      nt1_planck = nt2_planck;
-      nt2_planck++;
-    }
-    if(nt2_planck==137 && (logt > logttable_planck(nt2_planck)))
-      nt1_planck=nt2_planck;
-
-    while((logt > logttable(nt2)) && (nt2 < 211)){
-      nt1 = nt2;
-      nt2++;
-    }
-    if(nt2==211 && (logt > logttable(nt2)))
-      nt1=nt2;
-
-  
-
-    Real kappa_t1_rho1=opacitytable(nt1,nrhot1);
-    Real kappa_t1_rho2=opacitytable(nt1,nrhot2);
-    Real kappa_t2_rho1=opacitytable(nt2,nrhot1);
-    Real kappa_t2_rho2=opacitytable(nt2,nrhot2);
-
-    Real planck_t1_rho1=planckopacity(nt1_planck,nrhot1_planck);
-    Real planck_t1_rho2=planckopacity(nt1_planck,nrhot2_planck);
-    Real planck_t2_rho1=planckopacity(nt2_planck,nrhot1_planck);
-    Real planck_t2_rho2=planckopacity(nt2_planck,nrhot2_planck);
-
-
-    // in the case the temperature is out of range
-    // the planck opacity should be smaller by the 
-    // ratio T^-3.5
-    if(nt2_planck == 137 && (logt > logttable_planck(nt2_planck))){
-       Real scaling = pow(10.0, -3.5*(logt - logttable_planck(137)));
-       planck_t1_rho1 *= scaling;
-       planck_t1_rho2 *= scaling;
-       planck_t2_rho1 *= scaling;
-       planck_t2_rho2 *= scaling;
-    }
-
-
-    Real rho_1 = logrhottable(nrhot1);
-    Real rho_2 = logrhottable(nrhot2);
-    Real t_1 = logttable(nt1);
-    Real t_2 = logttable(nt2);
-
-    
-    if(nrhot1 == nrhot2){
-      if(nt1 == nt2){
-        kappa = kappa_t1_rho1;
-      }else{
-        kappa = kappa_t1_rho1 + (kappa_t2_rho1 - kappa_t1_rho1) *
-                                (logt - t_1)/(t_2 - t_1);
-      }/* end same T*/
-    }else{
-      if(nt1 == nt2){
-        kappa = kappa_t1_rho1 + (kappa_t1_rho2 - kappa_t1_rho1) *
-                                (logrhot - rho_1)/(rho_2 - rho_1);
-      }else{
-        kappa = kappa_t1_rho1 * (t_2 - logt) * (rho_2 - logrhot)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t2_rho1 * (logt - t_1) * (rho_2 - logrhot)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t1_rho2 * (t_2 - logt) * (logrhot - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t2_rho2 * (logt - t_1) * (logrhot - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1));
-      }
-    }/* end same rhoT */
-
-    rho_1 = logrhottable_planck(nrhot1_planck);
-    rho_2 = logrhottable_planck(nrhot2_planck);
-    t_1 = logttable_planck(nt1_planck);
-    t_2 = logttable_planck(nt2_planck);
- 
-  /* Now do the same thing for Planck mean opacity */
-    if(nrhot1_planck == nrhot2_planck){
-      if(nt1_planck == nt2_planck){
-        kappa_planck = planck_t1_rho1;
-      }else{
-        kappa_planck = planck_t1_rho1 + (planck_t2_rho1 - planck_t1_rho1) *
-                                (logt - t_1)/(t_2 - t_1);
-      }/* end same T*/
-    }else{
-      if(nt1_planck == nt2_planck){
-        kappa_planck = planck_t1_rho1 + (planck_t1_rho2 - planck_t1_rho1) *
-                                (logrhot - rho_1)/(rho_2 - rho_1);
-
-      }else{        
-        kappa_planck = planck_t1_rho1 * (t_2 - logt) * (rho_2 - logrhot)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-                     + planck_t2_rho1 * (logt - t_1) * (rho_2 - logrhot)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-                     + planck_t1_rho2 * (t_2 - logt) * (logrhot - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-                     + planck_t2_rho2 * (logt - t_1) * (logrhot - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1));
-      }
-    }/* end same rhoT */
-
-    return;
-
-}
-
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck){
 
   //STEP1: find index of temperature and density range
@@ -1772,91 +1603,17 @@ void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kap
                                 /((t_2 - t_1) * (rho_2 - rho_1));
       }
     }
+
+    //if replace_low_dens_ff is true, replace the low density opacity with free-free
+    if (replace_low_dens_ff==1){
+      if (rho <= rho_cut_ff){
+	kappa_ross = kappa_es + kappa_ff_ross(tgas, rho);
+	kappa_planck = kappa_ff_planck(tgas, rho);
+      }
+    }
+    
 }
 
-void opacity(MeshBlock *pmb, AthenaArray<Real> &prim){
-  NRRadiation *pnrrad=pmb->pnrrad;
-  int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
-  //int kl=pmb->kl, ku=pmb->ku, js=pmb->jl, je=pmb->ju, is=pmb->il, ie=pmb->iu;
-  int il = is - NGHOST;
-  int iu = ie + NGHOST;
-  int jl = js - NGHOST;
-  int ju = je + NGHOST;
-  int kl = ks - NGHOST;
-  int ku = ke + NGHOST;
-
-  for (int k=kl; k<=ku; k++){
-    for (int j=jl; j<=ju; j++){
-      for (int i=il; i<=iu; i++){
-	Real rho = prim(IDN,k,j,i);
-	Real temp = prim(IPR,k,j,i)/prim(IDN,k,j,i);
-	
-	//one frequency
-	pnrrad->sigma_s(k,j,i,0) = rho*kappa_es_code; //scatter
-	pnrrad->sigma_a(k,j,i,0) = 0.0; //flux mean
-	pnrrad->sigma_pe(k,j,i,0) = rho*kappa_ff(temp, rho); //energy mean
-	pnrrad->sigma_p(k,j,i,0) = rho*kappa_ff(temp, rho); //Planck mean 
-	
-      }//end i
-    }//end j
-  }//end k
-
-}
-
-
-void opalopacity(MeshBlock *pmb, AthenaArray<Real> &prim){
-  NRRadiation *pnrrad=pmb->pnrrad;
-  int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
-  //int kl=pmb->kl, ku=pmb->ku, js=pmb->jl, je=pmb->ju, is=pmb->il, ie=pmb->iu;
-  int il = is - NGHOST;
-  int iu = ie + NGHOST;
-  int jl = js - NGHOST;
-  int ju = je + NGHOST;
-  int kl = ks - NGHOST;
-  int ku = ke + NGHOST;
-
-  // electron scattering opacity
-  //Real kappa_es = 0.2 * (1.0 + 0.7);
-  Real kappaa = 0.0;
-
-  for (int k=kl; k<=ku; k++){
-    for (int j=jl; j<=ju; j++){
-      for (int i=il; i<=iu; i++){
-	Real rho = prim(IDN,k,j,i);
-	Real temp = std::max(prim(IPR,k,j,i)/prim(IDN,k,j,i), tfloor);
-	Real kappa, kappa_planck;
-	rossopacity(rho, temp, kappa, kappa_planck);
-        Real t_ion = 1.0e4;
-	
-	if(kappa < kappa_es){
-	  if(temp < t_ion/temp_unit){
-	    kappaa = kappa;
-	    kappa = 0.0;
-	  }else{
-	    kappaa = 0.0;
-	  }
-	}else{
-	  kappaa = kappa - kappa_es;
-	  kappa = kappa_es;
-	}
-	
-	//one frequency
-	pnrrad->sigma_s(k,j,i,0) = kappa * rho * rho_unit * l_unit; //scatter
-	pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //Rossland mean
-	pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //Rossland mean
-        pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;
-	// //Planck mean - Rossland mean
-	// if(kappaa < kappa_planck){
-	//   pnrrad->sigma_planck(k,j,i,0) = (kappa_planck-kappaa)*rho*rho_unit*l_unit;
-	// }else{
-	//   pnrrad->sigma_planck(k,j,i,0) = 0.0;
-        // }
-      
-      }//end i
-    }//end j
-  }//end k
-
-}
 
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 
@@ -1875,8 +1632,6 @@ void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
     kl = ks - NGHOST;
     ku = ke + NGHOST;
   }
-
-
 
   Real kappaa = 0.0;
 
@@ -2045,4 +1800,47 @@ Real massfluxix1(MeshBlock *pmb, int iout){
   return massflux;
 
 
+}
+
+ //input code unit, output code unit, planck mean free free absorption
+Real kappa_ff_planck(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 2.86e-5*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs/kappa_unit;
+}
+
+//input code unit, output code unit, rosseland mean free free absorption
+Real kappa_ff_ross(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 7.73e-7*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs/kappa_unit;
+}
+
+
+//input code unit, output cgs
+Real kappa_ff_nu(Real nu, Real temp, Real rho){
+
+  Real h_planck = 6.626196e-27 ;
+  Real evtohz = 2.41838e14;
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real m_p = m_p = 1.6726e-24;
+  Real k_B = 1.3807e-16;
+  
+  Real  gff = 1.0;
+  Real  z = 1.0;
+
+  Real  he_adbund = 0.04;
+  Real  nh = rho_cgs/m_p/(1.0 + 4.0*he_adbund);
+  Real  nhe = nh*he_adbund;
+  Real  ne = nh + 2.0*nhe;
+  Real  n_rho = rho_cgs/m_p/0.62;
+
+  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(n_rho, 2) * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
+
+  return std::max(e_ff/rho_cgs, 1.0e-10); //add a floor
 }
