@@ -63,6 +63,8 @@ static int n_rho = 140;
 static int n_tem = 70;
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+bool replace_low_dens_ff;
+Real rho_cut_ff; 
 
 //refinement
 static Real rad_thresh, ph_thresh, th_thresh;
@@ -612,8 +614,8 @@ int RefinementCondition3(MeshBlock *pmb){
   //if (injection_flag==1)
   //  printf("gid:%d, maxeps:%g, maxdens:%g, current level:%d, pmb->root:%d, pmb->cuurent:%d\n", pmb->gid, maxeps, max_dens, current_level, pmb->pmy_mesh->root_level, pmb->pmy_mesh->current_level);
 
-  //if ((maxeps>1.0 && max_dens>1.0e-5)||injection_flag ==1) return 1; //run to t=0.3
-  //if (maxeps<1.0e-3) return -1;//run to t=0.3
+  if ((maxeps>1.0 && max_dens>1.0e-5)||injection_flag ==1) return 1; //run to t=0.3
+  if (maxeps<1.0e-3) return -1;//run to t=0.3
   
   Real r_min = pmb->pcoord->x1f(pmb->is);
   Real dis_th_l = std::fabs(pmb->pcoord->x2f(pmb->js) - PI/2.0);
@@ -672,8 +674,8 @@ int RefinementCondition3(MeshBlock *pmb){
   //if ((maxeps>1.0 && max_dens>1.0) && r_min>6.0 && dis_th_min<0.088) return 1;
   //if (maxeps<0.05 || r_min<4.8 || max_dens<1.0e-2) return -1;
 
-  if ((maxeps>5.0 && max_dens>3.0) && r_min>6.0 && dis_th_min<0.088) return 1;
-  if (maxeps<0.05 || r_min<4.8 || max_dens<5.0e-2) return -1;
+  //if ((maxeps>5.0 && max_dens>3.0) && r_min>6.0 && dis_th_min<0.088) return 1;
+  //if (maxeps<0.05 || r_min<4.8 || max_dens<5.0e-2) return -1;
 
   //only used in trying restart a .rst file with numlevel=6 -> numlevel=5
   //if (pmb->pmy_mesh->current_level>8 && (maxeps>1.0 && max_dens>5.0e-4) && r_min>3.0 && dis_th_min<0.088) return -1;
@@ -1214,7 +1216,7 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 
   Real t_current = pmb->pmy_mesh->time;
   Real local_dens_now_ = GetMdot(pmb, t_current);
-  //local_dens_now_ = 1.0; //for rho1 run
+  local_dens_now_ = 1.0; //for rho1 run
 
   Real rinj_thresh=inj_thresh;//2x2x3 (r,th,phi) ghost cells for a wider stream than it is thick
   for (int k=ks; k<=ke; ++k) {//phi
@@ -1240,6 +1242,7 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	// }
 
 	//XS: alternatively, only find closest one cell. If it's i=1, then inject at both (k,j,ie+i) and (k,j,ie+i+1); otherwise, if i=2, inject at (k,j,ie+i) nad (k,j,ie+i-1)
+	//XS: swith to distance selected in future GR calculation, this is confusing
 	r_inj = rad_inject; 
 	rad=pco->x1f(ie+2);
 
@@ -1271,7 +1274,7 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 									    cos(th_coord)*cos(th_inj))); //real distance from injection point
                                                                                                         // (fc) to injection cell (vc)
 
-	  //printf("boundary: r:%g, phi:%g, theta:%g, x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", r_coord, ph_coord, th_coord, x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
+	  printf("boundary: r:%g, phi:%g, theta:%g, x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", r_coord, ph_coord, th_coord, x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
 	  //HERE CHOOSE rinj_thresh THAT ONLY ALLOW SINGLE INDEX OF i 
 	 //printf("boundary, gid:%d, k:%d, j:%d, i:%d, x1v:%g, x1v_l:%g, x1v_r:%g, x2v:%g, x3v:%g, d_inj:%g\n", pmb->gid, k, j, i, pmb->pcoord->x1v(ie+i), pmb->pcoord->x1v(ie+i-1), pmb->pcoord->x1v(ie+i+1), pmb->pcoord->x2v(j), pmb->pcoord->x3v(k), d_inj);
 
