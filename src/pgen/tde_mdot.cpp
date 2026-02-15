@@ -168,8 +168,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   pfloor = pin->GetOrAddReal("hydro", "pfloor", 0.001);
 
   //opacity flags
-  replace_low_dens_ff = GetOrAddInteger("problem", "replace_low_dens_ff", 0);
-  rho_cut_ff = GetOrAddReal("problem", "rho_cut_ff", 1.0e-7);  
+  replace_low_dens_ff = pin->GetOrAddInteger("problem", "replace_low_dens_ff", 0);
+  rho_cut_ff = pin->GetOrAddReal("problem", "rho_cut_ff", 1.0e-7);  
 
   user_dt = pin->GetOrAddReal("problem", "user_dt", 1.0e-6);
   //Initialize the injection point
