@@ -75,6 +75,7 @@ static Real rad_coarse_thresh, ph_coarse_thresh, th_coarse_thresh;
 //stream injection boundary
 static Real r0, inj_thresh, b0;
 static Real rad_inject2; //rad_inject,  phi_inject;
+int rho1_flag;
 
 // User-defined boundary conditions for disk simulations
 void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
@@ -179,6 +180,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   local_vr = pin->GetReal("problem", "local_vr");
   local_vphi = pin->GetReal("problem", "local_vphi");
   //local_press = pin->GetReal("problem", "local_press");
+  rho1_flag = pin->GetOrAddInteger("problem", "rho1_flag", 0);
 
   f_dr = pin->GetOrAddInteger("problem", "f_dr", 1);  
   f_dth = pin->GetOrAddInteger("problem", "f_dth", 1);
@@ -719,8 +721,11 @@ void Mesh::UserWorkInLoop(){
     //get current loacla dens
     Real t_current = pmb->pmy_mesh->time;
     Real local_dens_now_ = GetMdot(pmb, t_current);
-    //for rho=1
-    //local_dens_now_ = 1.0;
+
+    //hard-code local density to 1.0 in runs to calculate mass flux normalization.
+    if (rho1_flag==1){
+      local_dens_now_ = 1.0;
+    }
     for(int k=ks; k<=ke; k++){
       for(int i=is; i<=ie; i++){
 	for(int j=js; j<=je; j++){
