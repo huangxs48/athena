@@ -1193,8 +1193,12 @@ void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,Face
 void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt,int is, int ie, int js, int je, int ks, int ke, int ngh){
 
   Real t_current = pmb->pmy_mesh->time;
-  Real local_dens_now_ = GetMdot(pmb, t_current);
-  local_dens_now_ = 1.0; //for rho1 run
+  Real local_dens_now_;
+  if (rho1_flag==1){
+    local_dens_now_ = 1.0; //for rho1 run
+  }else{
+    local_dens_now_ = GetMdot(pmb, t_current);
+  }
 
   Real rinj_thresh=inj_thresh;//2x2x3 (r,th,phi) ghost cells for a wider stream than it is thick
   for (int k=ks; k<=ke; ++k) {//phi
@@ -1747,7 +1751,7 @@ Real massfluxox1(MeshBlock *pmb, int iout){
   Real massflux = 0.0;
   int is=pmb->is, ie=pmb->ie, js=pmb->js, je=pmb->je, ks=pmb->ks, ke=pmb->ke;
   AthenaArray<Real> face1;
-  face1.NewAthenaArray((ie-is)+2*NGHOST+2);
+  //face1.NewAthenaArray((ie-is)+2*NGHOST+1);
 
   AthenaArray<Real> x1flux = pmb->phydro->flux[X1DIR];
   //bool boundaryflag;
@@ -1757,9 +1761,9 @@ Real massfluxox1(MeshBlock *pmb, int iout){
     //printf("here\n");
     for (int k=ks; k<=ke; k++){
       for (int j=js; j<=je; j++){
-	pmb->pcoord->Face1Area(k , j, is, ie, face1);
-	for (int i=ie; i<=ie; i++){
-	  massflux += face1(ie)*x1flux(0,k,j,ie);//x1flux(0) is the density flux, multiply by volume to get mass
+	//pmb->pcoord->Face1Area(k , j, is, ie, face1);
+	for (int i=1; i<=1; i++){
+      massflux += pmb->pcoord->GetFace1Area(k,j,ie+i)*x1flux(IDN,k,j,ie+i); //x1flux(IDN) is the density flux, multiply by volume to get mass
           //printf("face:%g, x1flux:%g\n", face1(ie), x1flux(0, k, j, ie));
 	}
 
@@ -1769,7 +1773,7 @@ Real massfluxox1(MeshBlock *pmb, int iout){
 
   //printf("outter mass flux:%g\n", massflux);
 
-  face1.DeleteAthenaArray();
+  //face1.DeleteAthenaArray();
   x1flux.DeleteAthenaArray();
 
   return massflux;
