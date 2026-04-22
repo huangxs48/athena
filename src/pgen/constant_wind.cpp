@@ -1,0 +1,756 @@
+//========================================================================================
+// Athena++ astrophysical MHD code
+// Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
+// Licensed under the 3-clause BSD License, see LICENSE file for details
+//========================================================================================
+// C headers
+
+// C++ headers
+#include <algorithm>  // min
+#include <cmath>      // sqrt
+#include <cstdlib>    // srand
+#include <cstring>    // strcmp()
+#include <fstream>
+#include <iostream>   // endl
+#include <limits>
+#include <sstream>    // stringstream
+#include <stdexcept>  // runtime_error
+#include <string>     // c_str()
+
+// Athena++ headersc
+#include "../athena.hpp"
+#include "../athena_arrays.hpp"
+#include "../bvals/bvals.hpp"
+#include "../coordinates/coordinates.hpp"
+#include "../eos/eos.hpp"
+#include "../field/field.hpp"
+#include "../globals.hpp"
+#include "../hydro/hydro.hpp"
+#include "../mesh/mesh.hpp"
+#include "../parameter_input.hpp"
+#include "../nr_radiation/radiation.hpp"
+#include "../nr_radiation/integrators/rad_integrators.hpp"
+#include "../units/units.hpp"
+
+//general variables to record mesh size and cell number
+static int mesh_nx1, mesh_nx2, mesh_nx3;
+static Real mesh_x1min, mesh_x1max, x1ratio;
+static Real mesh_x2min, mesh_x2max;
+static Real mesh_x3min, mesh_x3max;
+
+//general variables converts c.g.s unit and unit-less variables in code
+static Real kappa_es;
+static Real temp_unit, l_unit, rho_unit, kappa_unit, vel_unit, time_unit;
+static Real tfloor; //temperature floor used in radiation class
+static Real dfloor, pfloor; //density, pressure floor used in hydro class
+
+//initial background density and pressure
+static Real rho_init, press_init;
+static Real boundary_temp_lim; //optional, temperature uplimit at boundary
+
+//prescribed wind base density, density profile index, total mdot
+static Real rho_wind_base, rho_wind_index, mdot_wind, r_wind_in;
+static Real lum_trapping_cgs; //assumed luminosity at trapping radius
+
+//opacity function
+//frequency dependent free-free
+Real kappa_ff_nu(Real nu, Real temp, Real rho);
+void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+
+//the frequency grid
+static AthenaArray<Real> fre_grid;
+
+//frequency integrated opacity
+Real kappa_ff_planck(Real temp, Real rho);
+Real kappa_ff_ross(Real temp, Real rho);
+void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+
+// User-defined boundary conditions for hydro and radiation
+void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+                 Real time, Real dt,
+                 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+                 Real time, Real dt,
+                 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+                const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+                Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
+
+void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+                const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+                Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
+
+//AMR condition
+int RefinementCondition(MeshBlock *pmb);
+
+//following are for reading in an initial csm profile
+//buffer arrays for coordinate
+std::vector<float> x1coord;
+std::vector<float> x2coord;
+std::vector<float> x3coord;
+
+//recoding input density, temperature, velocity
+static AthenaArray<Real> rho_init_buff;
+static AthenaArray<Real> temp_init_buff;
+static AthenaArray<Real> vel_init_buff;
+
+//simple search for index of variable al in an array vec
+int getindex(std::vector<float> vec, float val){
+  std::vector<float>::iterator it = std::find(vec.begin(), vec.end(), val);
+  int index = std::distance(vec.begin(), it);
+  return index;
+}
+
+
+//========================================================================================
+//! \fn void Mesh::InitUserMeshData(ParameterInput *pin)
+//  \brief Function to initialize problem-specific data in mesh class.  Can also be used
+//  to initialize variables which are global to (and therefore can be passed to) other
+//  functions in this file.  Called in Mesh constructor.
+//========================================================================================
+
+
+void Mesh::InitUserMeshData(ParameterInput *pin) {
+  int blocksizex1 = pin->GetOrAddInteger("meshblock", "nx1", 1);
+  int blocksizex2 = pin->GetOrAddInteger("meshblock", "nx2", 1);
+  int blocksizex3 = pin->GetOrAddInteger("meshblock", "nx3", 1);
+
+  kappa_es = pin->GetReal("problem", "kappa_es");
+
+  temp_unit = pin->GetReal("problem", "temp_unit");
+  l_unit = pin->GetReal("problem", "l_unit");
+  rho_unit = pin->GetReal("problem", "rho_unit");
+  //kappa_unit: cm^2/g
+  kappa_unit = 1.0/(rho_unit*l_unit);
+  vel_unit = Constants::speed_of_light_cgs/pin->GetReal("radiation", "crat");
+
+  tfloor = pin->GetOrAddReal("radiation", "tfloor", 1.0e-8);
+  dfloor = pin->GetOrAddReal("hydro", "dfloor", 1.0e-8);
+  pfloor = pin->GetOrAddReal("hydro", "pfloor", 1.0e-8);
+
+  rho_init = pin->GetOrAddReal("hydro", "rho_init", 1.0e-8);
+  press_init = pin->GetOrAddReal("hydro", "press_init", 1.0e-8);
+
+  boundary_temp_lim = pin->GetOrAddReal("problem", "boundary_temp_lim", 1.0e5);
+  //mass_bottom_cgs = pin->GetReal("problem", "mass_bottom_cgs");
+
+  //prescribed wind parameters
+  rho_wind_base = pin->GetOrAddReal("problem", "rho_wind_base", 1.0e-1);
+  rho_wind_index = pin->GetOrAddReal("problem", "rho_wind_index", -2.0);
+  r_wind_in = pin->GetOrAddReal("problem", "r_wind_in", 0.1);
+  mdot_wind = pin->GetOrAddReal("problem", "mdot_wind", 1.0);
+  lum_trapping_cgs = pin->GetOrAddReal("problem", "lum_trapping_cgs", 0.0);
+
+  // Enroll user-defined boundary condition
+  if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
+    EnrollUserBoundaryFunction(BoundaryFace::inner_x1, HydroInnerX1);
+  }
+  if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
+    EnrollUserBoundaryFunction(BoundaryFace::outer_x1, HydroOuterX1);
+  }
+
+  // Enroll AMR condiation
+  if(adaptive==true)
+    EnrollUserRefinementCondition(RefinementCondition);
+
+
+  if (NR_RADIATION_ENABLED){
+    //Enroll rad boundaries
+    if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
+      EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
+    }
+    if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
+      EnrollUserRadBoundaryFunction(BoundaryFace::outer_x1, RadOuterX1);
+    }
+  }
+
+  // //do not use this "self-gravity" for now
+  // EnrollUserExplicitSourceFunction(EnvGravity);
+  
+  // AllocateUserHistoryOutput(2);
+  // EnrollUserHistoryOutput(0, einj_int, "einj_int");//
+  // EnrollUserHistoryOutput(1, einj_dt, "einj_dt");//
+  // EnrollUserHistoryOutput(3, massflux_Inj_x3, "massflux_Inj_x3");//mass flux outer
+  // EnrollUserHistoryOutput(4, massfluxix1, "massfluxix1");//mass flux inner boundary
+  // EnrollUserHistoryOutput(5, massfluxox1, "massfluxox1");//mass flux outer
+
+  // read in mesh size and number of cells to prepare reading initial csm profile and graivty source term
+  mesh_nx1 = pin->GetInteger("mesh", "nx1");
+  mesh_x1min = pin->GetReal("mesh", "x1min");
+  mesh_x1max = pin->GetReal("mesh", "x1max");
+  mesh_nx2 = pin->GetInteger("mesh", "nx2");
+  mesh_x2min = pin->GetReal("mesh", "x2min");
+  mesh_x2max = pin->GetReal("mesh", "x2max");
+  mesh_nx3 = pin->GetInteger("mesh", "nx3");
+  mesh_x3min = pin->GetReal("mesh", "x3min");
+  mesh_x3max = pin->GetReal("mesh", "x3max");
+  x1ratio = pin->GetReal("mesh", "x1rat");
+
+  //prepare three vectors for index finding of x1 x2 x3 coordinates
+
+  //Real dx1 = (mesh_x1max - mesh_x1min)/mesh_nx1;
+  Real dx2 = (mesh_x2max - mesh_x2min)/mesh_nx2;
+  Real dx3 = (mesh_x3max - mesh_x3min)/mesh_nx3;
+  //the vector are equivalent to pcoord->x1v, x2v, x3v
+  // XS: NOTE here assumed logarithmic r_grid
+  for(int i=0; i<mesh_nx1; i++){
+    Real x1coord_now = (pow(x1ratio, i)-1.0)/(pow(x1ratio, mesh_nx1)-1.0) *
+                       (mesh_x1max - mesh_x1min) + mesh_x1min;
+    x1coord.push_back(x1coord_now);
+  }
+  for(int j=0; j<mesh_nx2; j++){
+    x2coord.push_back(mesh_x2min+j*dx2);
+  }
+  for(int k=0; k<mesh_nx3; k++){
+    x3coord.push_back(mesh_x3min+k*dx3);
+  }
+
+  //read in initial density, temperature, velocity
+  AllocateRealUserMeshDataField(3);
+  ruser_mesh_data[0].NewAthenaArray(mesh_nx1);
+  ruser_mesh_data[1].NewAthenaArray(mesh_nx1);
+  ruser_mesh_data[2].NewAthenaArray(mesh_nx1);
+  //keep record of enclosed mass in each radius
+  ruser_mesh_data[3].NewAthenaArray(mesh_nx1); //x1coordinate
+  // ruser_mesh_data[4].NewAthenaArray(mesh_nx1); //mass in each shell
+  // ruser_mesh_data[5].NewAthenaArray(mesh_nx1); //mass coordinate of each shell
+  // ruser_mesh_data[6].NewAthenaArray(mesh_nx1); //enclosed mass in each radius
+  // ruser_mesh_data[7].NewAthenaArray(mesh_nx1); //summbed b coefficient, not used,
+  // ruser_mesh_data[8].NewAthenaArray(mesh_nx1); //added energy, not used
+
+  for(int i=0; i<mesh_nx1; i++){
+    ruser_mesh_data[3](i) = x1coord[i];
+  }
+  
+  // FILE *f_init_rho;
+  // if ( (f_init_rho=fopen("./init_rho.txt","r"))==NULL )
+  //   {
+  //     printf("Open input file error: initial density, init_rho.txt");
+  //     return;
+  //   }
+
+  // FILE *f_init_temp;
+  // if ( (f_init_temp=fopen("./init_temp.txt","r"))==NULL )
+  //   {
+  //     printf("Open input file error: initial temperature, init_temp.txt");
+  //     return;
+  //   }
+
+  // FILE *f_init_vel;
+  // if ( (f_init_vel=fopen("./init_vel.txt","r"))==NULL )
+  //   {
+  //     printf("Open input file error: initial velocity, init_vel.txt");
+  //     return;
+  //   }
+
+  // rho_init_buff.NewAthenaArray(mesh_nx1);
+  // temp_init_buff.NewAthenaArray(mesh_nx1);
+  // vel_init_buff.NewAthenaArray(mesh_nx1);
+  
+  // //load density, temperature, velocity
+  // for(int i=0; i<mesh_nx1; ++i){
+  //   fscanf(f_init_rho, "%lf", &(rho_init_buff(i)));
+  //   fscanf(f_init_temp, "%lf", &(temp_init_buff(i)));
+  //   fscanf(f_init_vel, "%lf", &(vel_init_buff(i)));   
+  // }
+
+  // for(int i=0; i<mesh_nx1; ++i){
+  //   ruser_mesh_data[0](i) = rho_init_buff(i) / rho_unit;
+  //   ruser_mesh_data[1](i) = temp_init_buff(i) / temp_unit;
+  //   ruser_mesh_data[2](i)= vel_init_buff(i) / vel_unit;   
+  // }
+
+  return;
+}
+
+//initialize user mesh block data
+void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
+{
+  int blocksizex1 = pin->GetOrAddInteger("meshblock", "nx1", 1);
+  int blocksizex2 = pin->GetOrAddInteger("meshblock", "nx2", 1);
+  int blocksizex3 = pin->GetOrAddInteger("meshblock", "nx3", 1);
+
+  blocksizex1 += 2*(NGHOST);
+  if (blocksizex2 >1) blocksizex2 += 2*(NGHOST);
+  if (blocksizex3 >1) blocksizex3 += 2*(NGHOST);
+  
+  AllocateRealUserMeshBlockDataField(4); //pre-allocate for diagnostic reason, probably ok to skip for now
+  ruser_meshblock_data[0].NewAthenaArray(4,blocksizex3, blocksizex2, blocksizex1); //
+  ruser_meshblock_data[1].NewAthenaArray(4,blocksizex3, blocksizex2, blocksizex1); //
+  ruser_meshblock_data[2].NewAthenaArray(5,blocksizex3, blocksizex2, blocksizex1); //
+  ruser_meshblock_data[3].NewAthenaArray(3,blocksizex3, blocksizex2, blocksizex1); //
+
+  AllocateIntUserMeshBlockDataField(1);
+  iuser_meshblock_data[0].NewAthenaArray(blocksizex1);//store the index of global coordinate array
+  //iuser_meshblock_data[1].NewAthenaArray(blocksizex1);//flag to mass injection
+
+  //enroll opacity function here
+  if (NR_RADIATION_ENABLED){
+    if (pnrrad->nfreq>1){
+      pnrrad->EnrollOpacityFunction(Multi_FreeFreeOpacity);
+    }else{
+      pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
+    }
+  }
+
+  //all for diagnostic, probably ok to skip 
+  // AllocateUserOutputVariables(8);
+  // SetUserOutputVariableName(0, "cellvol");
+  // SetUserOutputVariableName(1, "dmass_r");
+  // SetUserOutputVariableName(2, "mass_enclose_r");
+  // SetUserOutputVariableName(3, "r_index");
+  // SetUserOutputVariableName(4, "inject_flag");
+  // SetUserOutputVariableName(5, "mass_coord_r");
+  // SetUserOutputVariableName(6, "int_coefb");
+  // SetUserOutputVariableName(7, "einj");
+  return;
+}
+
+//an example refinement condition, find the density gradient maximum (simple shock finder)
+int RefinementCondition(MeshBlock *pmb)
+{
+  AthenaArray<Real> &w = pmb->phydro->w;
+  Real maxeps=0.0;
+  int k=pmb->ks;
+  for(int j=pmb->js; j<=pmb->je; j++) {
+    for(int i=pmb->is; i<=pmb->ie; i++) {
+      Real epsr= (std::abs(w(IDN,k,j,i+1)-2.0*w(IDN,k,j,i)+w(IDN,k,j,i-1)))/w(IDN,k,j,i);
+      Real epsp= (std::abs(w(IPR,k,j,i+1)-2.0*w(IPR,k,j,i)+w(IPR,k,j,i-1)))/w(IPR,k,j,i);
+      Real eps = std::max(epsr, epsp);
+      maxeps = std::max(maxeps, eps);
+    }
+  }
+  if (maxeps>1.0){
+    printf("my_rank:%d, gid:%d, maxeps:%g\n", Globals::my_rank, pmb->gid, maxeps);
+  }
+  if(maxeps > 1.0) return 1;
+  if(maxeps < 0.1) return -1;
+  return 0;
+}
+
+// this block is mainly for calculating enclosed gravity, probably ok to skip it if not using EnvGravity, 
+void Mesh::UserWorkInLoop(){
+
+  
+  MeshBlock *pmb = my_blocks(0);
+  for(int nb=0; nb<nblocal; ++nb){ //loop over meshblocks on the same core
+    pmb = my_blocks(nb);
+    
+    Hydro *phydro = pmb->phydro;
+    Coordinates *pcoord = pmb->pcoord;
+    int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
+
+    //NOTE only works for one-dimension problem right now
+    Real mass_coord_now = 0.0;
+    for(int i=is; i<=ie; i++){     
+      
+      Real r_now = pcoord->x1f(i);
+      int index_rnow = pmb->iuser_meshblock_data[0](i);
+
+      //then update mass in each shell
+      Real dmass = 0.0; // mass_bottom_cgs/mass_unit;
+        for(int k=ks; k<=ke; k++){
+	  for(int j=js; j<=je; j++){
+	    dmass += phydro->u(IDN,k,j,i) * pcoord->GetCellVolume(k,j,i);
+
+	    //sanity check
+	    for (int n=0; n<(NHYDRO);n++){
+	      if (phydro->u(n,k,j,i) != phydro->u(n,k,j,i)){
+		printf("block: %d, n: %d ,k: %d,j: %d,i: %d\n", pmb->gid,n,k,j,i);
+		printf("x1v: %g, x2v:%g, x3v:%g\n",pmb->pcoord->x1v(i), pmb->pcoord->x2v(j),pmb->pcoord->x3v(k));
+		//abort();
+	      }   
+	    }//end NHYDRO
+	    
+	  }//j
+	}//k
+
+    }//i
+ 
+    
+  }//loop over meshblocks
+  
+}
+
+void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin){
+  
+  // for(int k=ks; k<=ke; k++){
+  //   for(int j=js; j<=je; j++){
+  //     for(int i=is; i<=ie; i++){
+	
+  // 	Real r_now = pcoord->x1f(i);
+  // 	int index_rnow = iuser_meshblock_data[0](i);
+
+  // 	//try calculate mass here
+  // 	Real mass_rad = 0.0;
+  // 	for (int ii=0; ii<index_rnow; ii++){
+  // 	  mass_rad += mass_shell(ii);//pmy_mesh->ruser_mesh_data[4](ii);
+  // 	}
+  // 	//printf("index_now:%d, i:%d, gid:%d, my_rank:%d, mass_rad:%g\n", index_rnow, i, gid, Globals::my_rank, mass_rad);
+      
+  // 	// user_out_var(0,k,j,i) = pcoord->GetCellVolume(k,j,i);
+  // 	// user_out_var(1,k,j,i) = pmy_mesh->ruser_mesh_data[4](index_rnow);
+  // 	// //printf("output dmass:%g\n", pmy_mesh->ruser_mesh_data[4](index_rnow));s
+  // 	// user_out_var(2,k,j,i) = pmy_mesh->ruser_mesh_data[6](index_rnow); //mass_rad;
+  // 	// user_out_var(3,k,j,i) = index_rnow;
+  // 	// user_out_var(4,k,j,i) = iuser_meshblock_data[1](i); //injection flag
+  // 	// user_out_var(5,k,j,i) = pmy_mesh->ruser_mesh_data[5](index_rnow); //mass_rad;
+  // 	// user_out_var(6,k,j,i) = pmy_mesh->ruser_mesh_data[7](index_rnow); //integrated coefficient b
+  // 	// user_out_var(7,k,j,i) = ruser_meshblock_data[0](0,k,j,i);//injected energy
+  
+  //     }
+  //    }
+  //  }
+}
+
+
+//========================================================================================
+//! \fn void MeshBlock::ProblemGenerator(ParameterInput *pin)
+//  \brief Initializes shock profile as read-in data
+//========================================================================================
+
+void MeshBlock::ProblemGenerator(ParameterInput *pin) {
+
+  Real gamma_gas = peos->GetGamma();
+
+  //  Initialize density and momenta
+  for (int k=ks; k<=ke; ++k) {
+    for (int j=js; j<=je; ++j) {
+      for (int i=is; i<=ie; ++i) {
+
+	// //load data, find current r index
+        // Real x_now = pcoord->x1f(i);
+        // int index_xnow = getindex(x1coord, x_now);
+	// iuser_meshblock_data[0](i) = index_xnow;
+
+	// Real rho_now = pmy_mesh->ruser_mesh_data[0](index_xnow);
+	// Real temp_now = pmy_mesh->ruser_mesh_data[1](index_xnow);
+	// Real vel_now = pmy_mesh->ruser_mesh_data[2](index_xnow);
+        //printf("x_now:%g, index_x:%d, rho:%g, temp:%g, vel:%g\n", x_now, index_xnow, rho_now, temp_now, vel_now);
+
+	//find current radius, density and velocity
+	Real r_now = pcoord->x1v(i);
+	Real rho_now = rho_wind_base * pow(r_now/r_wind_in, rho_wind_index);
+	Real vel_now = mdot_wind / rho_now / (4.0*PI*r_now*r_now);
+	//apply floor
+	rho_now = std::max(rho_now, dfloor);
+	if (NR_RADIATION_ENABLED){
+	  vel_now = std::min(vel_now, 0.9*pnrrad->crat); //hard-coded for now
+	}
+	//set temperature by assuming a luminosity at trapping radius
+	//may not be exactly same as simulation
+	Real mdot_wind_cgs = mdot_wind * (rho_unit * pow(l_unit, 3)/time_unit);
+	Real mass_load_wind_cgs = mdot_wind_cgs * (4.0*PI*(vel_now*vel_unit));
+	Real tgas4_cgs = lum_trapping_cgs / mass_load_wind_cgs / (4.0*PI*Constants::radiation_aconst_cgs/Constants::speed_of_light_cgs);
+	Real temp_now = pow(tgas4_cgs, 0.25) / temp_unit;
+
+        phydro->u(IDN,k,j,i) = rho_now;
+        phydro->u(IM1,k,j,i) = rho_now * vel_now;
+        phydro->u(IM2,k,j,i) = 0.0;
+        phydro->u(IM3,k,j,i) = 0.0;
+	
+	if (NR_RADIATION_ENABLED){
+
+	  Real rho = rho_now;//phydro->w(IDN,k,j,i);
+	  Real temp = temp_now;//phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
+
+	  Real rho_cgs = rho*rho_unit;
+	  Real temp_cgs = temp*temp_unit;
+
+	  Real kappa_s, kappa_ross, kappa_planck;
+
+	  // electron scattering opacity, hard coded for now
+	  kappa_s = 0.2 * (1.0 + 0.6);
+	  Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
+	  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
+
+	  if (pnrrad->nfreq>1){
+	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
+
+	      //get current frequency
+	      //hard coded for now
+	      Real evtohz = 2.41838e14;
+	      Real nu_kev = 1.0; //fre_grid(ifr); //make this frequency grid 
+	      Real nu_hz = nu_kev*1000*evtohz;
+	      
+	      Real kappa_ff_cgs = kappa_ff_nu(nu_hz, temp, rho);
+	      //set rosseland mean and planck mean to be same for now, can be an issue
+	      kappa_ross = kappa_ff_cgs;
+	      kappa_planck = kappa_ff_cgs;
+	      
+	      pnrrad->sigma_s(k,j,i,ifr) = kappa_s * rho * rho_unit * l_unit; 
+	      pnrrad->sigma_a(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit; 
+	      pnrrad->sigma_pe(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
+	      pnrrad->sigma_p(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
+	    }
+	  }else{
+	    
+	    kappa_ross = kappa_ff_ross(temp, rho);
+	    kappa_planck = kappa_ff_planck(temp, rho);
+	    //one frequency, grey rhd for now
+	    pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
+	    pnrrad->sigma_a(k,j,i,0) = kappa_ross * rho * rho_unit * l_unit; //rosseland mean
+	    pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
+	    pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
+
+	  }
+
+	  //initialize intensity
+	  for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
+	    for(int n=0; n<pnrrad->nang; ++n){
+	      int ang=ifr*pnrrad->nang+n;
+	      pnrrad->ir(k,j,i,ang) = 0.0;//use temp_now^4 if assuming initial trad=tgas
+	    }
+	  }
+     
+	}//end rad
+
+	if (NON_BAROTROPIC_EOS) {
+	  phydro->u(IEN,k,j,i) = rho_now * temp_now /(gamma_gas - 1.0);
+	  phydro->u(IEN,k,j,i) += 0.5*(SQR(phydro->u(IM1,k,j,i))+SQR(phydro->u(IM2,k,j,i))
+                                       + SQR(phydro->u(IM3,k,j,i)))/phydro->u(IDN,k,j,i);
+	}//end non barotropic
+      }//end i
+      
+      
+    }//end j
+  }//end k
+
+  return;
+}
+
+
+void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  for (int k=ks; k<=ke; ++k) {//phi
+    Real phi_coord = pco->x3v(k);
+    for (int j=js; j<=je; ++j) {//theta
+      Real theta_coord = pco->x2v(j);
+      for (int i=1; i<=ngh; ++i) {//R
+        prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
+        prim(IVX,k,j,ie+i) = std::max(0.0, prim(IVX,k,j,ie));
+        prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);
+        prim(IVY,k,j,ie+i) = prim(IVY,k,j,ie);
+      if (NON_BAROTROPIC_EOS){
+        prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie);
+      }
+
+      }//end R
+    }//end theta
+  }//end Phi
+  
+}
+
+void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  for (int k=ks; k<=ke; ++k) {//phi
+    for (int j=js; j<=je; ++j) {//theta
+      for (int i=1; i<=ngh; ++i) {//R
+        prim(IDN,k,j,is-i) = prim(IDN,k,j,is); 
+        prim(IVX,k,j,is-i) = prim(IVX,k,j,is+i-1); //try only reflect velocity
+        prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
+        prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
+        if (NON_BAROTROPIC_EOS){
+          prim(IPR,k,j,is-i) = prim(IPR,k,j,is);
+        }
+
+      }//end R
+    }//end theta
+  }//end Phi
+
+}
+
+
+void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+                const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+                Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+  // copy radiation variables into ghost zones,
+  // only allow outflow
+
+  int &nang = pnrrad->nang; // angles per octant
+  int &nfreq = pnrrad->nfreq; // number of frequency bands
+
+  for (int k=ks; k<=ke; ++k) {
+  for (int j=js; j<=je; ++j) {
+  for (int i=1; i<=ngh; ++i) {
+  for (int ifr=0; ifr<nfreq; ++ifr){
+    for(int n=0; n<nang; ++n){
+      int ang=ifr*nang+n;
+      //if directs outwards: mu_dir<0, inward: mu_dir>0
+      Real mu_dir = pnrrad->mu(0,k,j,is,ang);
+      if (mu_dir < 0.0){
+        ir(k,j,is-i,ang) = ir(k,j,is,ang);
+      }else{
+        ir(k,j,is-i,ang) = 0.0;
+      }
+    }// end n
+  }// end ifr
+  }}}
+}
+
+void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+                const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+                Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  int &nang = pnrrad->nang; // angles per octant
+  int &nfreq = pnrrad->nfreq; // number of frequency bands
+
+  for (int k=ks; k<=ke; ++k) {
+  for (int j=js; j<=je; ++j) {
+  for (int i=1; i<=ngh; ++i) {
+  for (int ifr=0; ifr<nfreq; ++ifr){
+    for(int n=0; n<nang; ++n){
+      int ang=ifr*nang+n;
+      //if directs outwards: mu_dir>0, inward: mu_dir<0
+      Real mu_dir = pnrrad->mu(0,k,j,ie,ang);
+      if (mu_dir > 0.0){
+        ir(k,j,ie+i,ang) = ir(k,j,ie,ang);
+      }else{
+        ir(k,j,ie+i,ang) = 0.0;
+      }
+    }// end n
+  }// end ifr
+  }}}
+
+  return;
+
+}
+
+//input code unit, output cgs
+Real kappa_ff_nu(Real nu, Real temp, Real rho){
+
+  Real h_planck = 6.626196e-27 ;
+  Real evtohz = 2.41838e14;
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real m_p = 1.6726e-24;
+  Real k_B = 1.3807e-16;
+  
+  Real  gff = 1.0;
+  Real  z = 1.0;
+
+  Real  he_adbund = 0.04;
+  Real  nh = rho_cgs/m_p/(1.0 + 4.0*he_adbund);
+  Real  nhe = nh*he_adbund;
+  Real  ne = nh + 2.0*nhe;
+  Real  n_rho = rho_cgs/m_p/0.62;
+
+  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(n_rho, 2) * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
+
+  return e_ff/rho_cgs;
+}
+
+void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
+{
+  NRRadiation *prad = pmb->pnrrad;
+  int il = pmb->is; int jl = pmb->js; int kl = pmb->ks;
+  int iu = pmb->ie; int ju = pmb->je; int ku = pmb->ke;
+  il -= NGHOST;
+  iu += NGHOST;
+  if(ju > jl){
+    jl -= NGHOST;
+    ju += NGHOST;
+  }
+  if(ku > kl){
+    kl -= NGHOST;
+    ku += NGHOST;
+  }
+
+  // electron scattering opacity
+  Real kappas = 0.2 * (1.0 + 0.6);
+  Real kappaa = 0.0;
+  Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
+  Real T_llim = 1.0e4;//lower lim of TOPs data, temperature at which switch Combined opacity grey opacity including dust
+  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
+  
+  for (int k=kl; k<=ku; ++k) {
+  for (int j=jl; j<=ju; ++j) {
+  for (int i=il; i<=iu; ++i) {
+  for (int ifr=0; ifr<prad->nfreq; ++ifr){
+    Real rho  = prim(IDN,k,j,i);
+    Real tgas = std::max(prim(IEN,k,j,i)/rho, tfloor);
+
+    Real kappa_ff_cgs;
+
+    Real rho_cgs = rho * rho_unit;
+    Real tgas_cgs = tgas * temp_unit;
+
+    //hard coded for now
+    Real evtohz = 2.41838e14;
+    Real nu_kev = 1.0; //fre_grid(ifr); //make this frequency grid 
+    Real nu_hz = nu_kev*1000*evtohz;
+
+    kappa_ff_cgs = kappa_ff_nu(nu_hz, tgas, rho);
+
+    prad->sigma_s(k,j,i,ifr) = kappa_es * rho * rho_unit * l_unit; 
+    //assuming planck mean and rossland mean are same, make change to adapt your problem
+    prad->sigma_a(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit; 
+    prad->sigma_pe(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
+    prad->sigma_p(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
+  }    
+
+ }}}
+
+}
+
+void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
+
+  NRRadiation *pnrrad=pmb->pnrrad;
+  int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
+  //int kl=pmb->kl, ku=pmb->ku, js=pmb->jl, je=pmb->ju, is=pmb->il, ie=pmb->iu;
+  int il = is - NGHOST;
+  int iu = ie + NGHOST;
+  int jl=js, ju=je;
+  int kl=ks, ku=ke;
+  if (pmb->pmy_mesh->f2){
+    jl = js - NGHOST;
+    ju = je + NGHOST;
+  }
+  if (pmb->pmy_mesh->f3){
+    kl = ks - NGHOST;
+    ku = ke + NGHOST;
+  }
+
+  for (int k=kl; k<=ku; k++){
+    for (int j=jl; j<=ju; j++){
+      for (int i=il; i<=iu; i++){
+	
+	Real rho = prim(IDN,k,j,i);
+	Real temp = prim(IPR,k,j,i)/prim(IDN,k,j,i); //std::max(prim(IPR,k,j,i)/prim(IDN,k,j,i), tfloor);
+	Real rho_cgs = rho*rho_unit;
+	Real temp_cgs = temp*temp_unit;
+	
+	Real kappa_s, kappa_ross, kappa_planck;
+	kappa_s = kappa_es;
+	kappa_ross = kappa_ff_ross(temp_cgs, rho_cgs);
+	kappa_planck = kappa_ff_planck(temp_cgs, rho_cgs);
+	
+	//one frequency
+	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
+	pnrrad->sigma_a(k,j,i,0) = kappa_ross * rho * rho_unit * l_unit; //rosseland mean
+	pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
+        pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
+      
+      }//end i
+    }//end j
+  }//end k
+
+}
+
+ //input code unit, output code unit, planck mean free free absorption
+Real kappa_ff_planck(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 2.86e-5*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs/kappa_unit;
+}
+
+//input code unit, output code unit, rosseland mean free free absorption
+Real kappa_ff_ross(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 7.73e-7*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs/kappa_unit;
+}
