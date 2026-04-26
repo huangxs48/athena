@@ -868,8 +868,8 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 	
 	Real kappa_s, kappa_ross, kappa_planck;
 	kappa_s = kappa_es;
-	kappa_ross = 1.0e2* kappa_ff_ross(temp_cgs, rho_cgs);
-	kappa_planck = 1.0e2* kappa_ff_planck(temp_cgs, rho_cgs);
+	kappa_ross = kappa_ff_ross(temp, rho);
+	kappa_planck = kappa_ff_planck(temp, rho);
 	
 	//one frequency
 	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
