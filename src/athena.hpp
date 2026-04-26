@@ -19,11 +19,14 @@
 #include "defs.hpp"
 
 // See if we have FP16 support
+// _Float16 is preferred: it is a full arithmetic type that can be used as a function
+// return type. __fp16 is a storage-only type on x86/Apple Clang and cannot be returned
+// from functions, so we only fall back to it on ARM where it is a proper arithmetic type.
 #ifndef __INTEL_LLVM_COMPILER
-#if defined(__fp16) || defined(__FLT16_MAX__) || defined(__ARM_FP16_FORMAT_IEEE)
-#define fp16_t __fp16
-#elif defined(_Float16)
+#if defined(_Float16)
 #define fp16_t _Float16
+#elif defined(__ARM_FP16_FORMAT_IEEE)
+#define fp16_t __fp16
 #endif
 #else
 #define fp16_t_not_supported

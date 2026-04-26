@@ -50,7 +50,9 @@ static Real boundary_temp_lim; //optional, temperature uplimit at boundary
 
 //prescribed wind base density, density profile index, total mdot
 static Real rho_wind_base, rho_wind_index, mdot_wind, r_wind_in;
-static Real lum_trapping_cgs; //assumed luminosity at trapping radius
+static Real lum_trapping; //assumed luminosity at trapping radius
+static Real lum_base; //luminosity corresponding to the flux at boundary
+static Real t_lum_base_ramp; //timescale for flux and mdot to ramp up
 
 //opacity function
 //frequency dependent free-free
@@ -67,11 +69,10 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
 
 // User-defined boundary conditions for hydro and radiation
 void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
-                 Real time, Real dt,
-                 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+                 Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku, int ngh);
 void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
-                 Real time, Real dt,
-                 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+                 Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+
 void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
                 const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
                 Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
@@ -79,6 +80,13 @@ void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
                 const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
                 Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
+
+void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+		      Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+
+void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+		      const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+		      Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
 
 //AMR condition
 int RefinementCondition(MeshBlock *pmb);
@@ -139,11 +147,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   rho_wind_index = pin->GetOrAddReal("problem", "rho_wind_index", -2.0);
   r_wind_in = pin->GetOrAddReal("problem", "r_wind_in", 0.1);
   mdot_wind = pin->GetOrAddReal("problem", "mdot_wind", 1.0);
-  lum_trapping_cgs = pin->GetOrAddReal("problem", "lum_trapping_cgs", 0.0);
+  lum_trapping = pin->GetOrAddReal("problem", "lum_trapping", 0.0);
+  lum_base = pin->GetOrAddReal("problem", "lum_base", 0.0);
+  t_lum_base_ramp = pin->GetOrAddReal("problem", "t_lum_base_ramp", 1.0);
 
   // Enroll user-defined boundary condition
   if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::inner_x1, HydroInnerX1);
+    EnrollUserBoundaryFunction(BoundaryFace::inner_x1, ConstMdotInnerX1); //HydroInnerX1);
   }
   if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
     EnrollUserBoundaryFunction(BoundaryFace::outer_x1, HydroOuterX1);
@@ -157,7 +167,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   if (NR_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
-      EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
+      EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, ConstFluxInnerX1); //RadInnerX1);
     }
     if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x1, RadOuterX1);
@@ -428,24 +438,29 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	// Real vel_now = pmy_mesh->ruser_mesh_data[2](index_xnow);
         //printf("x_now:%g, index_x:%d, rho:%g, temp:%g, vel:%g\n", x_now, index_xnow, rho_now, temp_now, vel_now);
 
-	//find current radius, density and velocity
-	Real r_now = pcoord->x1v(i);
-	Real rho_now = rho_wind_base * pow(r_now/r_wind_in, rho_wind_index);
-	Real vel_now = mdot_wind / rho_now / (4.0*PI*r_now*r_now);
-	//apply floor
-	rho_now = std::max(rho_now, dfloor);
-	if (NR_RADIATION_ENABLED){
-	  vel_now = std::min(vel_now, 0.9*pnrrad->crat); //hard-coded for now
-	}
-	//set temperature by assuming a luminosity at trapping radius
-	//may not be exactly same as simulation
-	Real mdot_wind_cgs = mdot_wind * (rho_unit * pow(l_unit, 3)/time_unit);
-	Real mass_load_wind_cgs = mdot_wind_cgs * (4.0*PI*(vel_now*vel_unit));
-	Real tgas4_cgs = lum_trapping_cgs / mass_load_wind_cgs / (4.0*PI*Constants::radiation_aconst_cgs/Constants::speed_of_light_cgs);
-	Real temp_now = pow(tgas4_cgs, 0.25) / temp_unit;
+	// //find current radius, density and velocity
+	// Real r_now = pcoord->x1v(i);
+	// Real rho_now = rho_wind_base * pow(r_now/r_wind_in, rho_wind_index);
+	// Real vel_now = mdot_wind / rho_now / (4.0*PI*r_now*r_now);
+	// //apply floor
+	// rho_now = std::max(rho_now, dfloor);
+	// if (NR_RADIATION_ENABLED){
+	//   vel_now = std::min(vel_now, 0.9*pnrrad->crat); //hard-coded for now
+	// }
+	// //set temperature by assuming a luminosity at trapping radius
+
+	// Real kappa_es_code = kappa_es * rho_unit * l_unit; 
+	// Real mass_load_wind = mdot_wind * (vel_now);
+	// Real tgas4 =  kappa_es_code * lum_trapping / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pnrrad->crat*pnrrad->prat);
+	// Real temp_now = pow(tgas4, 0.25) ;
+	// //printf("r_now:%g, mdot_wind:%g, mass_load:%g, vel_now:%g, tgas4:%g\n", r_now, mdot_wind, mass_load_wind, vel_now, tgas4);
+
+	//assuming a low density background gas
+	Real rho_now = rho_init;
+	Real temp_now = press_init;
 
         phydro->u(IDN,k,j,i) = rho_now;
-        phydro->u(IM1,k,j,i) = rho_now * vel_now;
+        phydro->u(IM1,k,j,i) = 0.0; //vel_now;
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
 	
@@ -499,7 +514,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	  for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
 	    for(int n=0; n<pnrrad->nang; ++n){
 	      int ang=ifr*pnrrad->nang+n;
-	      pnrrad->ir(k,j,i,ang) = 0.0;//use temp_now^4 if assuming initial trad=tgas
+	      pnrrad->ir(k,j,i,ang) = 1.0e-20; //pow(temp, 4);//use temp_now^4 if assuming initial trad=tgas
 	    }
 	  }
      
@@ -547,11 +562,11 @@ void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,Face
     for (int j=js; j<=je; ++j) {//theta
       for (int i=1; i<=ngh; ++i) {//R
         prim(IDN,k,j,is-i) = prim(IDN,k,j,is); 
-        prim(IVX,k,j,is-i) = prim(IVX,k,j,is+i-1); //try only reflect velocity
+        prim(IVX,k,j,is-i) = std::min(0.0, prim(IVX,k,j,is));//prim(IVX,k,j,is+i-1); //try only reflect velocity
         prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
         prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
         if (NON_BAROTROPIC_EOS){
-          prim(IPR,k,j,is-i) = prim(IPR,k,j,is);
+          prim(IPR,k,j,is-i) = std::max(prim(IPR,k,j,is), boundary_temp_lim/temp_unit * prim(IDN,k,j,is));
         }
 
       }//end R
@@ -613,6 +628,137 @@ void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
   }}}
 
   return;
+
+}
+
+void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
+		      const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+		      Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+  
+  //boundary condition to insert a constant flux corresponding to lum_base,
+  //only for one band yet
+
+  for (int k=ks; k<=ke; ++k) {
+    for (int j=js; j<=je; ++j) {
+      for (int i=1; i<=ngh; ++i) {
+  
+	//try use cell-center values
+	Real rho_local = (w(IDN,k,j,is) + w(IDN,k,j,is-i))/2.0;
+	Real dr = pco->dx1v(is-i);
+	Real r_local = pco->x1v(is-i);
+
+	//target flux
+	Real frad_local = lum_base / (4.0*PI*r_local*r_local);
+	//add a grandually increasing factor
+	if (time>0.0){
+	  frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
+	  //printf("frad_now:%g\n", frad_local);
+	}
+
+	// //initialze moment array
+	// if (time==0.0){
+	//   pmb->pnrrad->CalculateMoment(pmb->pnrrad->ir);
+	// }
+
+	//get coefficient between Prr_rad/Erad, close to 1/3. when isotropic
+	//energy density of first active cell
+	Real er_is = 0.0;
+	Real pr11_is = 0.0;
+	//Real pr22_is = 0.0;
+	//Real pr33_is = 0.0;
+	for (int n=0; n<pnrrad->nang; ++n){//for single band
+	  Real wmu = pnrrad->wmu(n);
+	  Real mux = pnrrad->mu(0,k,j,is,n);
+	  Real muy = pnrrad->mu(1,k,j,is,n);
+	  Real muz = pnrrad->mu(2,k,j,is,n);
+	  er_is += wmu * ir(k,j,is,n);
+	  pr11_is += wmu * mux * mux * ir(k,j,is,n);
+	  //pr22_is += wmu * muy * muy * ir(k,j,is,n);
+	  //pr33_is += wmu * muz * muz * ir(k,j,is,n);
+	}
+	
+        //Real er_is = pmb->pnrrad->rad_mom(IER,k,j,is);
+	//Real pr11_is = pmb->pnrrad->rad_mom(IPR11,k,j,is);
+	Real fedd_is = 3.0;
+	
+	// if (time > 0.0 and er_is >0.0 and pr11_is>0.0){
+	//   fedd_is = (er_is/pr11_is); 
+	//   //printf("fedd: %g, er_is/pr22_is:%g, er_is/pr33_is:%g\n", fedd_is, er_is/pr22_is, er_is/pr33_is);
+	// }
+	
+	Real er_local = er_is + fedd_is * dr * rho_local * frad_local;
+	//printf("er_is=%g, pr11_is=%g, dr=%g, rho_local=%g, frad_local=%g\n", er_is, pr11_is, dr, rho_local, frad_local);
+
+	//get intensity coefficients
+	Real coefa_u = 0.0, coefb_u = 0.0;
+	Real coefa_d = 0.0, coefb_d = 0.0;
+
+	for (int n=0; n<pnrrad->nang; ++n) {
+	  Real mux = pnrrad->mu(0,k,j,is-i,n);
+	  Real weight = pnrrad->wmu(n);
+	  if (mux > 0.0){
+	    coefa_u += weight;
+	    coefb_u += mux * weight;
+	  } else {
+	    coefa_d += weight;
+	    coefb_d += mux * weight;
+	  }
+	}//end angle
+
+	for (int n=0; n<pnrrad->nang; ++n){
+	  Real mux = pnrrad->mu(0,k,j,is-i,n);
+	  if (mux > 0.0){
+	    ir(k,j,is-i,n) = 0.5 * (er_local/coefa_u + frad_local/coefb_u);
+	  }else{
+	    ir(k,j,is-i,n) = 0.5 * (er_local/coefa_d + frad_local/coefb_d);
+	  }
+	  //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
+	}//end angle
+	
+      }//i
+    }//j
+  }//k
+
+}
+
+void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim, FaceField &b, Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  for (int k=ks; k<=ke; ++k) {//phi
+    for (int j=js; j<=je; ++j) {//theta
+      for (int i=1; i<=ngh; ++i) {//R
+
+	//find current radius, density and velocity
+	Real r_now = pco->x1v(is-i);
+	Real rho_now = rho_wind_base;// * pow(r_now/r_wind_in, rho_wind_index);
+	Real mdot_wind_now = mdot_wind ;//* (1.0 - exp(-time/t_lum_base_ramp));
+	if (time>0.0){
+	  mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
+	}
+	//printf("mdot_now:%g\n", mdot_wind_now);
+	Real vel_now = mdot_wind_now / rho_now / (4.0*PI*r_now*r_now);
+
+	//estimate gas temperature
+	Real mass_load_wind = mdot_wind_now / vel_now;
+	Real temp_now = press_init/rho_init;
+	
+	if (NR_RADIATION_ENABLED){
+	  Real kappa_es_code = kappa_es * rho_unit * l_unit; 
+	  Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
+	  temp_now = pow(tgas4, 0.25) ;
+	}
+	
+        prim(IDN,k,j,is-i) = rho_now; 
+        prim(IVX,k,j,is-i) = prim(IVX,k,j,is); //vel_now
+        prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
+        prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
+
+	if (NON_BAROTROPIC_EOS){
+          prim(IPR,k,j,is-i) = std::max(rho_now*temp_now, boundary_temp_lim/temp_unit * rho_now);
+        }
+
+      }//end R
+    }//end theta
+  }//end Phi
 
 }
 
@@ -722,8 +868,8 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 	
 	Real kappa_s, kappa_ross, kappa_planck;
 	kappa_s = kappa_es;
-	kappa_ross = kappa_ff_ross(temp_cgs, rho_cgs);
-	kappa_planck = kappa_ff_planck(temp_cgs, rho_cgs);
+	kappa_ross = 1.0e2* kappa_ff_ross(temp_cgs, rho_cgs);
+	kappa_planck = 1.0e2* kappa_ff_planck(temp_cgs, rho_cgs);
 	
 	//one frequency
 	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
