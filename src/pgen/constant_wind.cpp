@@ -730,12 +730,12 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	//find current radius, density and velocity
 	Real r_now = pco->x1v(is-i);
 	Real rho_now = rho_wind_base;// * pow(r_now/r_wind_in, rho_wind_index);
-	Real mdot_wind_now = mdot_wind ;//* (1.0 - exp(-time/t_lum_base_ramp));
+	Real mdot_wind_now = mdot_wind ;
 	if (time>0.0){
-	  mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
+	   mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
 	}
-	//printf("mdot_now:%g\n", mdot_wind_now);
 	Real vel_now = mdot_wind_now / rho_now / (4.0*PI*r_now*r_now);
+	//printf("mdot_now:%g, vel_now:%g\n", mdot_wind_now, vel_now);
 
 	//estimate gas temperature
 	Real mass_load_wind = mdot_wind_now / vel_now;
@@ -748,7 +748,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	}
 	
         prim(IDN,k,j,is-i) = rho_now; 
-        prim(IVX,k,j,is-i) = prim(IVX,k,j,is); //vel_now
+        prim(IVX,k,j,is-i) = vel_now; //prim(IVX,k,j,is);
         prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
         prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
 
@@ -857,6 +857,7 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
     ku = ke + NGHOST;
   }
 
+  //printf("kappaes:%g\n", kappa_es);
   for (int k=kl; k<=ku; k++){
     for (int j=jl; j<=ju; j++){
       for (int i=il; i<=iu; i++){
@@ -883,20 +884,20 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 
 }
 
- //input code unit, output code unit, planck mean free free absorption
+ //planck mean free free absorption
 Real kappa_ff_planck(Real temp, Real rho){
   Real rho_cgs = rho*rho_unit;
   Real temp_cgs =  temp*temp_unit;
   Real kappa_cgs = 2.86e-5*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
 
-  return kappa_cgs/kappa_unit;
+  return kappa_cgs;
 }
 
-//input code unit, output code unit, rosseland mean free free absorption
+//rosseland mean free free absorption
 Real kappa_ff_ross(Real temp, Real rho){
   Real rho_cgs = rho*rho_unit;
   Real temp_cgs =  temp*temp_unit;
   Real kappa_cgs = 7.73e-7*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
 
-  return kappa_cgs/kappa_unit;
+  return kappa_cgs;
 }
