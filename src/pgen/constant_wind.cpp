@@ -55,6 +55,11 @@ static Real lum_base; //luminosity corresponding to the flux at boundary
 static Real t_lum_base_ramp; //timescale for flux and mdot to ramp up
 
 //opacity function
+std::string  opacity_file;
+std::string  opacity_type;
+static int n_tem;
+static int n_rho;
+
 //frequency dependent free-free
 Real kappa_ff_nu(Real nu, Real temp, Real rho);
 void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
@@ -64,8 +69,6 @@ static AthenaArray<Real> combine_temp_grid;
 static AthenaArray<Real> combine_rho_grid;
 static AthenaArray<Real> combine_ross_table;
 static AthenaArray<Real> combine_planck_table;
-static int n_rho = 140;
-static int n_tem = 70;
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
 
@@ -162,6 +165,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   lum_base = pin->GetOrAddReal("problem", "lum_base", 0.0);
   t_lum_base_ramp = pin->GetOrAddReal("problem", "t_lum_base_ramp", 1.0);
 
+  //opacity
+  opacity_file = pin->GetOrAddString("problem", "opacity_file", "None");
+  opacity_type = pin->GetOrAddString("problem", "opacity_type", "table");
+  n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
+  n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
+
   // Enroll user-defined boundary condition
   if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
     EnrollUserBoundaryFunction(BoundaryFace::inner_x1, ConstMdotInnerX1); //HydroInnerX1);
@@ -242,97 +251,64 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   for(int i=0; i<mesh_nx1; i++){
     ruser_mesh_data[3](i) = x1coord[i];
   }
-  
-  // FILE *f_init_rho;
-  // if ( (f_init_rho=fopen("./init_rho.txt","r"))==NULL )
-  //   {
-  //     printf("Open input file error: initial density, init_rho.txt");
-  //     return;
-  //   }
-
-  // FILE *f_init_temp;
-  // if ( (f_init_temp=fopen("./init_temp.txt","r"))==NULL )
-  //   {
-  //     printf("Open input file error: initial temperature, init_temp.txt");
-  //     return;
-  //   }
-
-  // FILE *f_init_vel;
-  // if ( (f_init_vel=fopen("./init_vel.txt","r"))==NULL )
-  //   {
-  //     printf("Open input file error: initial velocity, init_vel.txt");
-  //     return;
-  //   }
-
-  // rho_init_buff.NewAthenaArray(mesh_nx1);
-  // temp_init_buff.NewAthenaArray(mesh_nx1);
-  // vel_init_buff.NewAthenaArray(mesh_nx1);
-  
-  // //load density, temperature, velocity
-  // for(int i=0; i<mesh_nx1; ++i){
-  //   fscanf(f_init_rho, "%lf", &(rho_init_buff(i)));
-  //   fscanf(f_init_temp, "%lf", &(temp_init_buff(i)));
-  //   fscanf(f_init_vel, "%lf", &(vel_init_buff(i)));   
-  // }
-
-  // for(int i=0; i<mesh_nx1; ++i){
-  //   ruser_mesh_data[0](i) = rho_init_buff(i) / rho_unit;
-  //   ruser_mesh_data[1](i) = temp_init_buff(i) / temp_unit;
-  //   ruser_mesh_data[2](i)= vel_init_buff(i) / vel_unit;   
-  // }
 
   if (NR_RADIATION_ENABLED){
 
-    //load combined opacity
-    combine_temp_grid.NewAthenaArray(n_tem);
-    combine_rho_grid.NewAthenaArray(n_rho);
-    combine_ross_table.NewAthenaArray(n_tem, n_rho);
-    combine_planck_table.NewAthenaArray(n_tem, n_rho);
-  
-    FILE *f_combineopacity;
-    
-    if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
-      {
-	printf("Open input file error combined opacity table");
-	return;
+    if (opacity_file!="None"){
+      //load combined opacity
+      combine_temp_grid.NewAthenaArray(n_tem);
+      combine_rho_grid.NewAthenaArray(n_rho);
+      combine_ross_table.NewAthenaArray(n_tem, n_rho);
+      combine_planck_table.NewAthenaArray(n_tem, n_rho);
+      
+      FILE *f_combineopacity;
+      
+      if ( (f_combineopacity=fopen(opacity_file.c_str(),"r"))==NULL )
+	{
+	  //printf("Open input file error combined opacity table %s\n", opacity_file.c_str());
+	  //return;
+	  std::stringstream msg;
+	  msg << "FATAL ERROR: Could not open opacity file "<< opacity_file.c_str() << std::endl;
+	  ATHENA_ERROR(msg);
+	}
+      
+      //first two lines are n_temp, n_rho
+      int buff;
+      for(int i=0; i<2; i++){
+	fscanf(f_combineopacity,"%d",&(buff));
       }
-    
-    //first two lines are n_temp, n_rho
-    int buff;
-    for(int i=0; i<2; i++){
-      fscanf(f_combineopacity,"%d",&(buff));
-    }
-
-    //load temperature grid
-    for(int i=0; i<n_tem; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
-    }
-
-    //load density grid
-    for(int i=0; i<n_rho; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
-    }
-
-    //load grey Rosseland mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+      
+      //load temperature grid
+      for(int i=0; i<n_tem; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
       }
-    }
-
-    //load grey Planck mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+      
+      //load density grid
+      for(int i=0; i<n_rho; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
       }
+      
+      //load grey Rosseland mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+	}
+      }
+      
+      //load grey Planck mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+	}
+      }
+      
+      fclose(f_combineopacity);
+      
+      // printf("testing opacity table\n");
+      // Real kappa_p_test, kappa_r_test;
+      // combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
+      // printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
     }
-
-    fclose(f_combineopacity);
-
-    // printf("testing opacity table\n");
-    // Real kappa_p_test, kappa_r_test;
-    // combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
-    // printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
 
   }
     return;
@@ -364,7 +340,14 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
     if (pnrrad->nfreq>1){
       pnrrad->EnrollOpacityFunction(Multi_FreeFreeOpacity);
     }else{
-      pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(FreeFreeOpacity);
+      if (opacity_type=="table"){
+	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(FreeFreeOpacity);
+      }else if (opacity_type=="freefree"){
+	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
+      }
+      if (Globals::my_rank==0){
+	std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
+      }
     }
   }
 
