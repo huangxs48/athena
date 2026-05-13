@@ -562,7 +562,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	  for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
 	    for(int n=0; n<pnrrad->nang; ++n){
 	      int ang=ifr*pnrrad->nang+n;
-	      pnrrad->ir(k,j,i,ang) = 1.0e-20; //pow(temp, 4);//use temp_now^4 if assuming initial trad=tgas
+	      pnrrad->ir(k,j,i,ang) = pow(temp, 4);//use temp_now^4 if assuming initial trad=tgas
 	    }
 	  }
      
@@ -692,16 +692,20 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
   
 	//try use cell-center values
 	Real rho_local = w(IDN,k,j,is-i);//(w(IDN,k,j,is) + w(IDN,k,j,is-i))/2.0;
+	Real sigma_local = 0.0;
+	if (time>0.0)
+	  sigma_local = pnrrad->sigma_a(k,j,i,0);
+	
 	Real dr = pco->dx1v(is-i);
 	Real r_local = pco->x1v(is-i);
 
 	//target flux
 	Real frad_local = lum_base / (4.0*PI*r_local*r_local);
 	//add a grandually increasing factor
-	if (time>0.0){
-	  frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
-	  //printf("frad_now:%g\n", frad_local);
-	}
+	// if (time>0.0){
+	//   frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
+	//   //printf("frad_now:%g\n", frad_local);
+	// }
 
 	// //initialze moment array
 	// if (time==0.0){
@@ -730,19 +734,20 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	Real fedd_is = 3.0;
 	
 	// if (time > 0.0 and er_is >0.0 and pr11_is>0.0){
-	//   fedd_is = (er_is/pr11_is); 
+	//   fedd_is = (pr11_is/er_is); 
 	//   //printf("fedd: %g, er_is/pr22_is:%g, er_is/pr33_is:%g\n", fedd_is, er_is/pr22_is, er_is/pr33_is);
 	// }
 	
-	Real er_local = er_is + fedd_is * dr * rho_local * frad_local;
-	//printf("er_is=%g, pr11_is=%g, dr=%g, rho_local=%g, frad_local=%g\n", er_is, pr11_is, dr, rho_local, frad_local);
+	Real er_local = er_is + fedd_is * sigma_local * dr * frad_local;
+	// if (i==1)
+	//   printf("er_is=%g, pr11_is=%g, dr=%g, rho_local=%g, frad_local=%g, sigma_local=%g\n", er_is, pr11_is, dr, rho_local, frad_local, sigma_local);
 
 	//get intensity coefficients
 	Real coefa_u = 0.0, coefb_u = 0.0;
 	Real coefa_d = 0.0, coefb_d = 0.0;
 
 	for (int n=0; n<pnrrad->nang; ++n) {
-	  Real mux = pnrrad->mu(0,k,j,is-i,n);
+	  Real mux = pnrrad->mu(0,k,j,is,n);
 	  Real weight = pnrrad->wmu(n);
 	  if (mux > 0.0){
 	    coefa_u += weight;
@@ -761,6 +766,9 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	    ir(k,j,is-i,n) = 0.5 * (er_local/coefa_d + frad_local/coefb_d);
 	  }
 	  //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
+	  // if (i==1 && (n==0||n==7))
+	  //   printf("nang=%d, i=%d, ir=%g, er_local=%g, frad_local=%g,  er_is=%g, pr11_is=%g, er/pr=%g\n", n, i, ir(k,j,is-i, n), er_local, frad_local,  er_is, pr11_is, er_is/pr11_is);
+	  
 	}//end angle
 	
       }//i
@@ -780,12 +788,15 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	//Real rho_now = rho_wind_base;
 	Real vel_now = vel_wind_base;
 	Real mdot_wind_now = mdot_wind;
+	Real lum_base_now = lum_base;
 	if (time>0.0){
 	   mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
+	   lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
 	}
 	//Real vel_now = mdot_wind_now / rho_now / (4.0*PI*r_now*r_now);
+	
 	Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
-	//printf("mdot_now:%g, vel_now:%g\n", mdot_wind_now, vel_now);
+	//printf("mdot_now:%g, rho_now:%g, vel_now:%g\n", mdot_wind_now, rho_now, vel_now);
 
 	//estimate gas temperature
 	Real mass_load_wind = mdot_wind_now / vel_now;
@@ -798,12 +809,12 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	}
 	
         prim(IDN,k,j,is-i) = rho_now; 
-        prim(IVX,k,j,is-i) = vel_now; //prim(IVX,k,j,is);
+        prim(IVX,k,j,is-i) = prim(IVX,k,j,is);
         prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
         prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
 
 	if (NON_BAROTROPIC_EOS){
-          prim(IPR,k,j,is-i) =  std::max(prim(IPR,k,j,is), boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); //std::max(rho_now*temp_now, boundary_temp_lim/temp_unit * rho_now);
+          prim(IPR,k,j,is-i) =  prim(IPR,k,j,is);//std::max(prim(IPR,k,j,is), boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); //std::max(rho_now*temp_now, boundary_temp_lim/temp_unit * rho_now);
         }
 
       }//end R
@@ -1002,6 +1013,10 @@ void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 	  kappa_ross = kappa_sct_ross - kappa_es;
 	  kappa_s = kappa_es;
 	}
+	// //assume a simple constant opacity for test
+	// kappa_s = 0.32;
+	// kappa_ross = 1.0;
+	// kappa_planck = 1.0;
 
 	//one frequency
 	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
