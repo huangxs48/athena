@@ -691,16 +691,17 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
       for (int i=1; i<=ngh; ++i) {
   
 	//try use cell-center values
-	Real rho_local = w(IDN,k,j,is-i);//(w(IDN,k,j,is) + w(IDN,k,j,is-i))/2.0;
+	Real rho_local = w(IDN,k,j,is);//(w(IDN,k,j,is) + w(IDN,k,j,is-i))/2.0;
 	Real sigma_local = 0.0;
 	if (time>0.0)
-	  sigma_local = pnrrad->sigma_a(k,j,i,0);
+	  sigma_local = pnrrad->sigma_a(k,j,is,0);
 	
-	Real dr = pco->dx1v(is-i);
-	Real r_local = pco->x1v(is-i);
+	Real dr = pco->dx1f(is);
+	Real r_local = pco->x1f(is);
 
 	//target flux
 	Real frad_local = lum_base / (4.0*PI*r_local*r_local);
+	//printf("frad_local:%g, lum_base:%g, r_local:%g\n", frad_local, lum_base, r_local);
 	//add a grandually increasing factor
 	if (time>0.0 && time<t_lum_base_ramp){
 	    frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
@@ -768,8 +769,18 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
 	  // if (i==1 && (n==0||n==7))
 	  //   printf("nang=%d, i=%d, ir=%g, er_local=%g, frad_local=%g,  er_is=%g, pr11_is=%g, er/pr=%g\n", n, i, ir(k,j,is-i, n), er_local, frad_local,  er_is, pr11_is, er_is/pr11_is);
-	  
 	}//end angle
+
+	//debug
+	Real fr_now = 0.0;
+	for (int n=0; n<pnrrad->nang; ++n){//for single band
+	  Real wmu = pnrrad->wmu(n);
+	  Real mux = pnrrad->mu(0,k,j,is-i,n);
+	  Real muy = pnrrad->mu(1,k,j,is-i,n);
+	  Real muz = pnrrad->mu(2,k,j,is-i,n);
+	  fr_now += wmu * mux * ir(k,j,is-i,n);
+	}
+	//printf("i=%d, fr(is-i):%g\n", i, fr_now);
 	
       }//i
     }//j
@@ -784,7 +795,8 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
       for (int i=1; i<=ngh; ++i) {//R
 
 	//find current radius, density and velocity
-	Real r_now = pco->x1v(is-i);
+	//use is value to be consistent with flux
+	Real r_now = pco->x1f(is);
 	//Real rho_now = rho_wind_base;
 	Real vel_now = vel_wind_base;
 	Real mdot_wind_now = mdot_wind;
@@ -796,7 +808,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	//Real vel_now = mdot_wind_now / rho_now / (4.0*PI*r_now*r_now);
 	
 	Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
-	//printf("mdot_now:%g, rho_now:%g, vel_now:%g\n", mdot_wind_now, rho_now, vel_now);
+	//printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g\n", mdot_wind_now, rho_now, vel_now, r_now);
 
 	//estimate gas temperature
 	Real mass_load_wind = mdot_wind_now / vel_now;
@@ -809,7 +821,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	}
 	
         prim(IDN,k,j,is-i) = rho_now; 
-        prim(IVX,k,j,is-i) = prim(IVX,k,j,is);
+        prim(IVX,k,j,is-i) = vel_now; //prim(IVX,k,j,is);
         prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
         prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
 
