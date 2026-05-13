@@ -702,10 +702,10 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	//target flux
 	Real frad_local = lum_base / (4.0*PI*r_local*r_local);
 	//add a grandually increasing factor
-	// if (time>0.0){
-	//   frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
-	//   //printf("frad_now:%g\n", frad_local);
-	// }
+	if (time>0.0 && time<t_lum_base_ramp){
+	    frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
+	    //printf("frad_now:%g\n", frad_local);
+	}
 
 	// //initialze moment array
 	// if (time==0.0){
@@ -789,7 +789,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	Real vel_now = vel_wind_base;
 	Real mdot_wind_now = mdot_wind;
 	Real lum_base_now = lum_base;
-	if (time>0.0){
+	if (time>0.0 && time<t_lum_base_ramp){
 	   mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
 	   lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
 	}
