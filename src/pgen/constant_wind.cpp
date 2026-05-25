@@ -820,7 +820,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	      }
 	      //loop over angles, assign intensity
 	      for (int n=0; n<pnrrad->nang; ++n){
-		Real mux = pnrrad->mu(0,k,j,is-i,n);
+		Real mux = pnrrad->mu(0,k,j,is-i,ifr*nang+n);
 		if (mux > 0.0){
 		  ir(k,j,is-i,ifr*nang+n) = 0.5 * frac * (er_local/coefa_u + frad_local/coefb_u);
 		}else{
