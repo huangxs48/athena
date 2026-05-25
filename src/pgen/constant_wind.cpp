@@ -52,6 +52,7 @@ static Real dfloor, pfloor; //density, pressure floor used in hydro class
 //initial background density and pressure
 static Real rho_init, press_init;
 static Real boundary_temp_lim; //optional, temperature uplimit at boundary
+Real boundary_temp_inj; //when multi-group, option to control boundary temperature
 
 //prescribed wind base density, density profile index, total mdot
 static Real rho_wind_base, rho_wind_index, mdot_wind, r_wind_in, vel_wind_base;
@@ -186,6 +187,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   lum_trapping = pin->GetOrAddReal("problem", "lum_trapping", 0.0);
   lum_base = pin->GetOrAddReal("problem", "lum_base", 0.0);
   t_lum_base_ramp = pin->GetOrAddReal("problem", "t_lum_base_ramp", 1.0);
+  boundary_temp_inj = pin->GetOrAddReal("problem", "boundary_temp_inj", -1.0);
   boundary_constraint_flag = pin->GetOrAddInteger("problem" ,"boundary_constraint_flag", 0);
 
   //opacity
@@ -261,26 +263,25 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
 
   //read in initial density, temperature, velocity
-  AllocateRealUserMeshDataField(3);
-  ruser_mesh_data[0].NewAthenaArray(mesh_nx1);
-  ruser_mesh_data[1].NewAthenaArray(mesh_nx1);
-  ruser_mesh_data[2].NewAthenaArray(mesh_nx1);
+  // AllocateRealUserMeshDataField(3);
+  // ruser_mesh_data[0].NewAthenaArray(mesh_nx1);
+  // ruser_mesh_data[1].NewAthenaArray(mesh_nx1);
+  // ruser_mesh_data[2].NewAthenaArray(mesh_nx1);
   //keep record of enclosed mass in each radius
-  ruser_mesh_data[3].NewAthenaArray(mesh_nx1); //x1coordinate
+  //ruser_mesh_data[].NewAthenaArray(mesh_nx1); //x1coordinate
   // ruser_mesh_data[4].NewAthenaArray(mesh_nx1); //mass in each shell
   // ruser_mesh_data[5].NewAthenaArray(mesh_nx1); //mass coordinate of each shell
   // ruser_mesh_data[6].NewAthenaArray(mesh_nx1); //enclosed mass in each radius
   // ruser_mesh_data[7].NewAthenaArray(mesh_nx1); //summbed b coefficient, not used,
   // ruser_mesh_data[8].NewAthenaArray(mesh_nx1); //added energy, not used
 
-  for(int i=0; i<mesh_nx1; i++){
-    ruser_mesh_data[3](i) = x1coord[i];
-  }
+  // for(int i=0; i<mesh_nx1; i++){
+  //   ruser_mesh_data[3](i) = x1coord[i];
+  // }
 
   if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
-    nfre = pin->GetOrAddReal("radiation", "n_frequency", 1);
+    nfre = pin->GetOrAddInteger("radiation", "n_frequency", 1);
     if (opacity_file != "None"){
-      
       if (nfre>1){
 	MultiReadOpacityTable();
       }else{
@@ -316,30 +317,27 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
 
   //enroll opacity function here
   if (NR_RADIATION_ENABLED){
-    if (pnrrad->nfreq>1){
-      pnrrad->EnrollOpacityFunction(Multi_FreeFreeOpacity);
-    }else{
-      if (pnrrad->nfreq==1){
-	if (opacity_type=="table"){
-	  pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(FreeFreeOpacity);
-	}else if (opacity_type=="freefree"){
-	  pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
-	}
-	if (Globals::my_rank==0)
-	  std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
+    if (pnrrad->nfreq==1){
+      if (opacity_type=="table"){
+	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(FreeFreeOpacity);
+      }else if (opacity_type=="freefree"){
+	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
+      }
+      if (Globals::my_rank==0)
+	std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
 	
-      }else{
-	if (opacity_type=="table"){
-	  pnrrad->EnrollOpacityFunction(MultiOpacity);//(FreeFreeOpacity);
-	}else if (opacity_type=="freefree"){
-	  pnrrad->EnrollOpacityFunction(Multi_FreeFreeOpacity);
-	}
+    }else{
+      if (opacity_type=="table"){
+	pnrrad->EnrollOpacityFunction(MultiOpacity);//(FreeFreeOpacity);
+      }else if (opacity_type=="freefree"){
+	pnrrad->EnrollOpacityFunction(Multi_FreeFreeOpacity);
+      }
 
-	if (Globals::my_rank==0)
-	  std::cout<<"Multi group. Using Opacity Type:"<<opacity_type<<std::endl;
+      if (Globals::my_rank==0)
+	std::cout<<"Multi group. Using Opacity Type:"<<opacity_type<<std::endl;
 
-      }//mg
-    }
+    }//mg
+    
   }
 
   //all for diagnostic, probably ok to skip 
@@ -519,19 +517,24 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
 
 	  if (pnrrad->nfreq>1){
+	    Real h_planck = 6.6260755e-27; // Planck constant
+	    Real k_b = 1.380649e-16;   // Boltzman constant
+	    Real evtohz = 2.41838e14; // Convert eV to Hz
+	    
 	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
 
 	      //get current frequency
 	      //hard coded for now
-	      Real evtohz = 2.41838e14;
-	      Real nu_kev = 1.0; //fre_grid(ifr); //make this frequency grid 
-	      Real nu_hz = nu_kev*1000*evtohz;
-	      
-	      Real kappa_ff_cgs = kappa_ff_nu(nu_hz, temp, rho);
-	      //set rosseland mean and planck mean to be same for now, can be an issue
-	      kappa_ross = kappa_ff_cgs;
-	      kappa_planck = kappa_ff_cgs;
-	      
+	      Real kappa_ff_cgs;
+
+	      //hard coded for now
+	      Real nu_now = pnrrad->nu_grid(ifr);
+	      if (ifr==0)
+		nu_now = pnrrad->nu_min;
+	      Real nu_hz= nu_now / (h_planck/(k_b * pnrrad->tunit));
+
+	      kappa_ff_cgs = kappa_ff_nu(nu_hz, temp, rho);
+    
 	      pnrrad->sigma_s(k,j,i,ifr) = kappa_s * rho * rho_unit * l_unit; 
 	      pnrrad->sigma_a(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit; 
 	      pnrrad->sigma_pe(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
@@ -750,28 +753,85 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  }
 	}//end angle
 
-	for (int n=0; n<pnrrad->nang; ++n){
-	  Real mux = pnrrad->mu(0,k,j,is-i,n);
-	  if (mux > 0.0){
-	    ir(k,j,is-i,n) = 0.5 * (er_local/coefa_u + frad_local/coefb_u);
-	  }else{
-	    ir(k,j,is-i,n) = 0.5 * (er_local/coefa_d + frad_local/coefb_d);
-	  }
-	  //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
-	  // if (i==1 && (n==0||n==7))
-	  //   printf("nang=%d, i=%d, ir=%g, er_local=%g, frad_local=%g,  er_is=%g, pr11_is=%g, er/pr=%g\n", n, i, ir(k,j,is-i, n), er_local, frad_local,  er_is, pr11_is, er_is/pr11_is);
-	}//end angle
+	if (pnrrad->nfreq==1){
+	  for (int n=0; n<pnrrad->nang; ++n){
+	    Real mux = pnrrad->mu(0,k,j,is-i,n);
+	    if (mux > 0.0){
+	      ir(k,j,is-i,n) = 0.5 * (er_local/coefa_u + frad_local/coefb_u);
+	    }else{
+	      ir(k,j,is-i,n) = 0.5 * (er_local/coefa_d + frad_local/coefb_d);
+	    }
+	    //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
+	    // if (i==1 && (n==0||n==7))
+	    //   printf("nang=%d, i=%d, ir=%g, er_local=%g, frad_local=%g,  er_is=%g, pr11_is=%g, er/pr=%g\n", n, i, ir(k,j,is-i, n), er_local, frad_local,  er_is, pr11_is, er_is/pr11_is);
+	  }//end angle
 
-	//debug
-	Real fr_now = 0.0;
-	for (int n=0; n<pnrrad->nang; ++n){//for single band
-	  Real wmu = pnrrad->wmu(n);
-	  Real mux = pnrrad->mu(0,k,j,is-i,n);
-	  Real muy = pnrrad->mu(1,k,j,is-i,n);
-	  Real muz = pnrrad->mu(2,k,j,is-i,n);
-	  fr_now += wmu * mux * ir(k,j,is-i,n);
-	}
-	printf("i=%d, fr(is-i):%g, fr_local:%g\n", i, fr_now, frad_local);
+	  //debug
+	  Real fr_now = 0.0;
+	  for (int n=0; n<pnrrad->nang; ++n){//for single band
+	    Real wmu = pnrrad->wmu(n);
+	    Real mux = pnrrad->mu(0,k,j,is-i,n);
+	    Real muy = pnrrad->mu(1,k,j,is-i,n);
+	    Real muz = pnrrad->mu(2,k,j,is-i,n);
+	    fr_now += wmu * mux * ir(k,j,is-i,n);
+	  }
+	  printf("i=%d, fr(is-i):%g, fr_local:%g\n", i, fr_now, frad_local);
+	}else{
+	  //multigroup, set the shape of BB at base corresponding to temperature temp_now
+	  //assuming every frequency bin has the same angular distribution
+	  int nfreq = pnrrad->nfreq;
+	  int nang = pnrrad->nang;
+
+	  //use is value to be consistent with flux
+	  Real r_now = pco->x1f(is);
+
+	  //Real rho_now = rho_wind_base;
+	  Real vel_now = vel_wind_base;
+	  Real mdot_wind_now = mdot_wind;
+	  Real lum_base_now = lum_base;
+	  if (time>0.0 && time<t_lum_base_ramp){
+	    mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
+	    lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
+	  }
+	  
+	  Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
+	  //printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g\n", mdot_wind_now, rho_now, vel_now, r_now);
+	  
+	  //estimate gas temperature
+	  Real mass_load_wind = mdot_wind_now / vel_now;
+	
+	  if (NR_RADIATION_ENABLED){
+	    //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
+	    Real kappa_es_code = kappa_es * rho_unit * l_unit; 
+	    Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
+	    Real temp_now = std::pow(tgas4, 1.0/4.0);
+	    if (boundary_temp_inj>0.0){
+	      temp_now = boundary_temp_inj;
+	    }
+	    
+	    //first calculate flux and energy fraction assuming black-body shape
+	    temp_now = pow(tgas4, 0.25) ;
+	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr) {
+	      Real frac = 0.0;
+	      if (ifr==nfreq-1){
+		frac = (1.0-pnrrad->FitIntPlanckFunc(pnrrad->nu_grid(ifr)/temp_now));
+	      }else{
+		frac = pnrrad->IntPlanckFunc(pnrrad->nu_grid(ifr)/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
+	      }
+	      //loop over angles, assign intensity
+	      for (int n=0; n<pnrrad->nang; ++n){
+		Real mux = pnrrad->mu(0,k,j,is-i,n);
+		if (mux > 0.0){
+		  ir(k,j,is-i,ifr*nang+n) = 0.5 * frac * (er_local/coefa_u + frad_local/coefb_u);
+		}else{
+		  ir(k,j,is-i,ifr*nang+n) = 0.5 * frac * (er_local/coefa_d + frad_local/coefb_d);
+		}
+	      }//end angle
+	    }
+	    
+	  }
+
+	}//end nfreq>1
 	
       }//i
     }//j
@@ -807,6 +867,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	Real temp_now = press_init/rho_init;
 	
 	if (NR_RADIATION_ENABLED){
+	  //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
 	  Real kappa_es_code = kappa_es * rho_unit * l_unit; 
 	  Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
 	  temp_now = pow(tgas4, 0.25) ;
@@ -818,7 +879,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	  prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
 	  prim(IVY,k,j,is-i) = prim(IVY,k,j,is);
 	  if (NON_BAROTROPIC_EOS){
-	    prim(IPR,k,j,is-i) =  std::max(temp_now*dens_now, boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); //std::max(rho_now*temp_now, boundary_temp_lim/temp_unit * rho_now);
+	    prim(IPR,k,j,is-i) =  std::max(temp_now*rho_now, boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); 
 	  }
 	}else{
 	  prim(IDN,k,j,is-i) = rho_now; 
@@ -829,7 +890,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	  if (NON_BAROTROPIC_EOS){
 	    prim(IPR,k,j,is-i) =  std::max(prim(IPR,k,j,is), boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); //std::max(rho_now*temp_now, boundary_temp_lim/temp_unit * rho_now);
 	  }
-	  printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g, temp_now:%g, temp_is:%g\n", mdot_wind_now, rho_now, vel_now, r_now, temp_now, prim(IPR,k,j,is)/prim(IDN,k,j,is));
+	  //printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g, temp_now:%g, temp_is:%g\n", mdot_wind_now, rho_now, vel_now, r_now, temp_now, prim(IPR,k,j,is)/prim(IDN,k,j,is));
 	}
 
       }//end R
@@ -855,9 +916,9 @@ Real kappa_ff_nu(Real nu, Real temp, Real rho){
   Real  nh = rho_cgs/m_p/(1.0 + 4.0*he_adbund);
   Real  nhe = nh*he_adbund;
   Real  ne = nh + 2.0*nhe;
-  Real  n_rho = rho_cgs/m_p/0.62;
+  Real  num_rho = rho_cgs/m_p/0.62;
 
-  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(n_rho, 2) * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
+  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(num_rho, 2) * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
 
   return e_ff/rho_cgs;
 }
@@ -878,12 +939,24 @@ void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
     ku += NGHOST;
   }
 
+  Real h_planck = 6.6260755e-27; // Planck constant
+  Real k_b = 1.380649e-16;   // Boltzman constant
+  Real evtohz = 2.41838e14; // Convert eV to Hz
+  
   // electron scattering opacity
   Real kappas = 0.2 * (1.0 + 0.6);
   Real kappaa = 0.0;
   Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
   Real T_llim = 1.0e4;//lower lim of TOPs data, temperature at which switch Combined opacity grey opacity including dust
   Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
+
+  // if (Globals::my_rank==0){
+  //   for (int ifr=0; ifr<prad->nfreq; ++ifr){
+  //     Real nu_now = prad->nu_grid(ifr);
+  //     Real nu_hz= nu_now / (h_planck/(k_b * prad->tunit));
+  //     printf("ifr=%d, nu_code=%g, nu_hz=%g\n", ifr, nu_now, nu_hz);
+  //   }
+  // }
   
   for (int k=kl; k<=ku; ++k) {
   for (int j=jl; j<=ju; ++j) {
@@ -898,9 +971,10 @@ void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
     Real tgas_cgs = tgas * temp_unit;
 
     //hard coded for now
-    Real evtohz = 2.41838e14;
-    Real nu_kev = fre_grid(ifr); //make this frequency grid 
-    Real nu_hz = nu_kev*1000*evtohz;
+    Real nu_now = prad->nu_grid(ifr);
+    if (ifr==0)
+      nu_now = prad->nu_min;
+    Real nu_hz= nu_now / (h_planck/(k_b * prad->tunit));
 
     kappa_ff_cgs = kappa_ff_nu(nu_hz, tgas, rho);
 
@@ -1312,21 +1386,21 @@ void fre_rossopacity(const Real rho, const Real tgas, const int fre_group,
     int nrho1 = 0;
     int nrho2 = 0;
 
-    while(( rho > fre_rho_grid(nrho2)) && (nrho2 < n_rho-1)){
+    while(( rho > fre_rho_grid(nrho2)) && (nrho2 < n_rho_mg-1)){
       nrho1 = nrho2;
       nrho2++;
     }
-    if(nrho2==n_rho-1 && (rho > fre_rho_grid(nrho2)))
+    if(nrho2==n_rho_mg-1 && (rho > fre_rho_grid(nrho2)))
       nrho1=nrho2;
 
 
     int nt1 = 0;
     int nt2 = 0;
-    while((tgas > fre_temp_grid(nt2)) && (nt2 < n_tem-1)){
+    while((tgas > fre_temp_grid(nt2)) && (nt2 < n_tem_mg-1)){
       nt1 = nt2;
       nt2++;
     }
-    if(nt2==n_tem-1 && (tgas > fre_temp_grid(nt2)))
+    if(nt2==n_tem_mg-1 && (tgas > fre_temp_grid(nt2)))
       nt1=nt2;
 
 
