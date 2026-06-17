@@ -427,10 +427,10 @@ void HistoryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
           std::fprintf(pfile,"[%d]=Pr33    ", iout++);
         } else {
           for (int ifr=0; ifr<pm->my_blocks(0)->pnrrad->nfreq; ++ifr) {
-            std::fprintf(pfile,"[%d]=Er   ", iout++);
-            std::fprintf(pfile,"[%d]=Fr1   ", iout++);
-            std::fprintf(pfile,"[%d]=Fr2   ", iout++);
-            std::fprintf(pfile,"[%d]=Fr3   ", iout++);
+            std::fprintf(pfile,"[%d]=Er_%d   ", iout++, ifr);
+            std::fprintf(pfile,"[%d]=Fr1_%d   ", iout++, ifr);
+            std::fprintf(pfile,"[%d]=Fr2_%d   ", iout++, ifr);
+            std::fprintf(pfile,"[%d]=Fr3_%d   ", iout++, ifr);
           }
         }
       }

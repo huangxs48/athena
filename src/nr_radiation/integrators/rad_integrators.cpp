@@ -172,7 +172,8 @@ RadIntegrator::RadIntegrator(NRRadiation *prad, ParameterInput *pin) {
   tgas_new_.NewAthenaArray(ncells3,ncells2,ncells1);
   vel_source_.NewAthenaArray(ncells3,ncells2,ncells1,3);
   taufact.NewAthenaArray(ncells3,ncells2,ncells1);
-
+  ////xiaoshan: add doppler_flag_cell_
+  //doppler_flag_cell_.NewAthenaArray(ncells3,ncells2,ncells1);
 
   rad_source.NewAthenaArray(4,ncells3,ncells2,ncells1);
   delta_source.NewAthenaArray(4,nfreq);
@@ -730,6 +731,8 @@ void RadIntegrator::PredictVel(AthenaArray<Real> &ir, int k, int j, int i,
   Real vy0 = (*vy);
   Real vz0 = (*vz);
 
+  //don't predict vel
+  
   Real m0x = prat * fr1 * invcrat + rho * vx0;
   Real m0y = prat * fr2 * invcrat + rho * vy0;
   Real m0z = prat * fr3 * invcrat + rho * vz0;
@@ -760,4 +763,5 @@ void RadIntegrator::PredictVel(AthenaArray<Real> &ir, int k, int j, int i,
 
   (*vz) = factor*(rhs3*(vx11*vy11 - vx12*vx12) + rhs2*(
       vx12*vx13 - vx11*vy12) + rhs1*(vx12*vy12 - vx13*vy11));
+
 }

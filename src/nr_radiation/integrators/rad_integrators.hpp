@@ -181,6 +181,7 @@ class RadIntegrator {
   AthenaArray<Real> dflx_ang_, ang_vol_;
   AthenaArray<Real> tgas_, vel_source_, tgas_new_; // array to store gas temperature,
                                         // velocity for source term
+  //AthenaArray<int> doppler_flag_cell_; //xiaoshan: added to control frame transformation cell-wise
   // these are temporary arrays for multi-group source terms
   AthenaArray<Real> sum_nu3_, sum_nu2_, sum_nu1_;
   AthenaArray<Real> eq_sol_;

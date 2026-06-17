@@ -154,6 +154,7 @@ Real RadIntegrator::MultiGroupAbsScat(
   }
   // even if tr=told, there can be change for intensity, making them isotropic
   if (!badcell) {
+    //tgasnew = tgas;//don't use updated temperature
     Real emission = tgasnew * tgasnew * tgasnew * tgasnew;
     for (int ifr=0; ifr<nfreq; ++ifr) {
       Real dtcsigmar = ct * sigma_a[ifr];

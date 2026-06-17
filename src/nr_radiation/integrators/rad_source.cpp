@@ -64,6 +64,10 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
   const int &nang =prad->nang;
   const int &nfreq=prad->nfreq;
 
+  //xiaoshan: for debugging
+  Real invredc = 1.0/prad->reduced_c;
+  Real invredfactor = invredc/invcrat;
+
   // Get the temporary arrays
   AthenaArray<Real> &wmu_cm = wmu_cm_;
   AthenaArray<Real> &tran_coef = tran_coef_;
@@ -88,6 +92,20 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
   sigma_s = &(prad->sigma_s(k,j,i,0));
   sigma_p = &(prad->sigma_p(k,j,i,0));
   sigma_pe =&(prad->sigma_pe(k,j,i,0));
+
+  //xiaoshan: add a cell-wise doppler flag for debugging
+  //doppler_flag_cell_(k,j,i) = 1;
+  pmb->ruser_meshblock_data[1](0,k,j,i) = 1.0;
+  //only do the Comoving<->Lab step for certain density and temperature range, don't change intensity in the funnel region
+  //first constrain by density and radial direction velocity, then density and temperature, using aggresvie condition
+  Real tgas_now = tgas_(k,j,i) * prad->tunit;
+  Real rho_now = rho * prad->rhounit;
+  Real vx_now = vx / prad->crat;//use the velocity goes into Doppler shift	
+  if ((rho_now<=1.0e-14 && vx_now>=0.15) || (rho_now<=1.0e-14 && tgas_now>1.0e7)){
+    //doppler_flag_cell_(k,j,i) = 0;
+    pmb->ruser_meshblock_data[1](0,k,j,i) = 0.0;
+  }
+  pmb->user_out_var(29,k,j,i) += pmb->ruser_meshblock_data[1](0,k,j,i); //doppler_flag_cell_(k,j,i);
 
   // Prepare the transformation coefficients
   Real numsum = 0.0;
@@ -157,9 +175,29 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
   } else {
     // map frequency grid
     if (doppler_flag_ > 0) {
+
+      //record ifr=5 and ifr=18 group total intensity and r direction flux increment
+      Real ir_5_before = 0.0;
+      Real ir_18_before = 0.0;
+      Real fr_5_before = 0.0;
+      Real fr_18_before = 0.0;
+
+      Real ir_5_after = 0.0;
+      Real ir_18_after = 0.0;
+      Real fr_5_after = 0.0;
+      Real fr_18_after = 0.0;
+      
       for (int n=0; n<nang; ++n) {
+	//get the angular weight for debugging flux
+	//weight of domega*cos(mu)_x
+	Real wmu = prad->wmu(n);
+	Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
         for (int ifr=0; ifr<nfreq; ++ifr) {
           ir_ori_(ifr) = ir_cm(ifr*nang+n);
+	  if (ifr==5) ir_5_before += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==5) fr_5_before += ir_cm(ifr*nang+n)*wmu_cosx;
+	  if (ifr==18) ir_18_before += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==18) fr_18_before += ir_cm(ifr*nang+n)*wmu_cosx;
         }
         split_ratio.InitWithShallowSlice(split_ratio_,3,n,1);
         map_start.InitWithShallowSlice(map_bin_start_,2,n,1);
@@ -169,14 +207,78 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
                                                      ir_ori_, ir_done_);
 
         for (int ifr=0; ifr<nfreq; ++ifr) {
+	  //only do the step for certain density and temperature range, don't change intensity in the funnel region
+	  //first constrain by density and radial direction velocity, then density and temperature, using aggresvie condition
+	  Real tgas_now = tgas_(k,j,i) * prad->tunit;
+	  Real rho_now = u(IDN,k,j,i) * prad->rhounit;
+          Real vx_now = vel_source_(k,j,i,0) / prad->crat;//use the velocity goes into Doppler shift
+
+	  if (pmb->ruser_meshblock_data[1](0,k,j,i)==0.0){
+	    //std::cout<<"doppler flag zero in gid:"<<pmb->gid<<" k: "<<k<<" j: "<<j<<" i: "<<i<<" rho: "<<pmb->phydro->w(IDN,k,j,i)<<" temp: "<<pmb->phydro->w(IPR,k,j,i)/pmb->phydro->w(IDN,k,j,i)<<std::endl;
+	    ir_done_(ifr) = ir_cm(ifr*nang+n); //ir_ori_(ifr);
+	  }//zero doppler flag 
           ir_cm(ifr*nang+n) = ir_done_(ifr);
+	  if (ifr==5) ir_5_after += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==5) fr_5_after += ir_cm(ifr*nang+n)*wmu_cosx;
+	  if (ifr==18) ir_18_after += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==18) fr_18_after += ir_cm(ifr*nang+n)*wmu_cosx;
         }
       }
+      //write diff into user mesh block data, make them the same unit as delta_source terms
+      pmb->user_out_var(25,k,j,i) += (ir_5_after - ir_5_before) * invredfactor; //energy moment
+      pmb->user_out_var(26,k,j,i) += (ir_18_after - ir_18_before) * invredfactor; 
+      pmb->user_out_var(27,k,j,i) += (fr_5_after - fr_5_before) * invredc; //flux moment
+      pmb->user_out_var(28,k,j,i) += (fr_18_after - fr_18_before) * invredc;
+      
     }
+
+    Real ir_5_before = 0.0;
+    Real ir_18_before = 0.0;
+    Real fr_5_before = 0.0;
+    Real fr_18_before = 0.0;
+
+    Real ir_5_after = 0.0;
+    Real ir_18_after = 0.0;
+    Real fr_5_after = 0.0;
+    Real fr_18_after = 0.0;
+
+    for (int n=0; n<nang; ++n) {
+      //get the angular weight for debugging flux
+      //weight of domega*cos(mu)_x
+      Real wmu = prad->wmu(n);
+      Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
+      for (int ifr=0; ifr<nfreq; ++ifr) {
+	if (ifr==5) ir_5_before += ir_cm(ifr*nang+n)*wmu;
+	if (ifr==5) fr_5_before += ir_cm(ifr*nang+n)*wmu_cosx;
+	if (ifr==18) ir_18_before += ir_cm(ifr*nang+n)*wmu;
+	if (ifr==18) fr_18_before += ir_cm(ifr*nang+n)*wmu_cosx;
+      }
+    }
+    
     // calculate the source term
     tgas_new_(k,j,i) = MultiGroupAbsScat(wmu_cm,tran_coef, sigma_at, sigma_p,
                                sigma_pe, sigma_s, dt, lorz, rho, tgas_(k,j,i),
                                                      implicit_coef_,ir_cm);
+
+    for (int n=0; n<nang; ++n){
+      //get the angular weight for debugging flux
+      //weight of domega*cos(mu)_x
+      Real wmu = prad->wmu(n);
+      Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
+      for (int ifr=0; ifr<nfreq; ++ifr) {
+	if (ifr==5) ir_5_after += ir_cm(ifr*nang+n)*wmu;
+	if (ifr==5) fr_5_after += ir_cm(ifr*nang+n)*wmu_cosx;
+	if (ifr==18) ir_18_after += ir_cm(ifr*nang+n)*wmu;
+	if (ifr==18) fr_18_after += ir_cm(ifr*nang+n)*wmu_cosx;
+      }
+    }
+
+    //write diff into user mesh block data, make them the same unit as delta_source terms
+    pmb->user_out_var(21,k,j,i) += (ir_5_after - ir_5_before) * invredfactor; //energy moment
+    pmb->user_out_var(22,k,j,i) += (ir_18_after - ir_18_before) * invredfactor; //energy moment
+    pmb->user_out_var(23,k,j,i) += (fr_5_after - fr_5_before) * invredc; //flux moment
+    pmb->user_out_var(24,k,j,i) += (fr_18_after - fr_18_before) * invredc; //flux moment
+    
     // Add compton scattering
     // Compton scattering for implicit scheme is added separately
     if ((compton_flag_ > 0) && (split_compton_ == 0)) {
@@ -197,10 +299,30 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
     }
     // map frequency grid
     if (doppler_flag_ > 0) {
+      //record ifr=5 and ifr=18 group total intensity and r direction flux increment
+      Real ir_5_before = 0.0;
+      Real ir_18_before = 0.0;
+      Real fr_5_before = 0.0;
+      Real fr_18_before = 0.0;
+
+      Real ir_5_after = 0.0;
+      Real ir_18_after = 0.0;
+      Real fr_5_after = 0.0;
+      Real fr_18_after = 0.0;
+      
       for (int n=0; n<nang; ++n) {
+	//get the angular weight for debugging flux
+	//weight of domega*cos(mu)_x
+	Real wmu = prad->wmu(n);
+	Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
         for (int ifr=0; ifr<nfreq; ++ifr) {
           ir_ori_(ifr) = ir_cm(ifr*nang+n);
+	  if (ifr==5) ir_5_before += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==5) fr_5_before += ir_cm(ifr*nang+n)*wmu_cosx;
+	  if (ifr==18) ir_18_before += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==18) fr_18_before += ir_cm(ifr*nang+n)*wmu_cosx;
         }
+	
         split_ratio.InitWithShallowSlice(split_ratio_,3,n,1);
         map_start.InitWithShallowSlice(map_bin_start_,2,n,1);
         map_end.InitWithShallowSlice(map_bin_end_,2,n,1);
@@ -221,9 +343,28 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
         }
 
         for (int ifr=0; ifr<nfreq; ++ifr) {
+          //only do the step for certain density and temperature range, don't change intensity in the funnel region
+          //first constrain by density and radial direction velocity, then density and temperature, using aggresvie condition
+          Real tgas_now = tgas_(k,j,i) * prad->tunit;
+          Real rho_now = u(IDN,k,j,i) * prad->rhounit;
+          Real vx_now = vel_source_(k,j,i,0) / prad->crat;//use the velocity goes into Doppler shift
+
+          if (pmb->ruser_meshblock_data[1](0,k,j,i)==0.0){
+	    ir_done_(ifr) = ir_cm(ifr*nang+n); //ir_ori_(ifr);
+	  }//no doppler flag
           ir_cm(ifr*nang+n) = ir_done_(ifr);
+	  if (ifr==5) ir_5_after += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==5) fr_5_after += ir_cm(ifr*nang+n)*wmu_cosx;
+	  if (ifr==18) ir_18_after += ir_cm(ifr*nang+n)*wmu;
+	  if (ifr==18) fr_18_after += ir_cm(ifr*nang+n)*wmu_cosx;
         }
       }
+    
+      //write diff into user mesh block data, make them the same unit as delta_source terms
+      pmb->user_out_var(13,k,j,i) += (ir_5_after - ir_5_before) * invredfactor; //energy moment
+      pmb->user_out_var(14,k,j,i) += (ir_18_after - ir_18_before) * invredfactor; 
+      pmb->user_out_var(15,k,j,i) += (fr_5_after - fr_5_before) * invredc; //flux moment
+      pmb->user_out_var(16,k,j,i) += (fr_18_after - fr_18_before) * invredc;
     }
   }
 
@@ -236,13 +377,36 @@ void RadIntegrator::CalSourceTerms(MeshBlock *pmb, const Real dt,
   Real omega_1 = 1.0 - omega;
 
   if (std::abs(omega_1) < TINY_NUMBER) {
+    Real ir_5_before = 0.0;
+    Real ir_18_before = 0.0;
+    Real fr_5_before = 0.0;
+    Real fr_18_before = 0.0;
+
+    Real ir_5_after = 0.0;
+    Real ir_18_after = 0.0;
+    Real fr_5_after = 0.0;
+    Real fr_18_after = 0.0;
     for (int ifr=0; ifr<nfreq; ++ifr) {
       lab_ir = &(ir(k,j,i,nang*ifr));
       for (int n=0; n<nang; ++n) {
+	Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
+	if (ifr==5) ir_5_before += ir_cm(n+ifr*nang)/cm_to_lab(n);
+	if (ifr==5) fr_5_before += wmu_cosx*ir_cm(n+ifr*nang)/cm_to_lab(n);
+	if (ifr==18) ir_18_before += ir_cm(n+ifr*nang)/cm_to_lab(n);
+	if (ifr==18) fr_18_before += wmu_cosx*ir_cm(n+ifr*nang)/cm_to_lab(n);	       
         lab_ir[n] = std::max(ir_cm(n+ifr*nang)/cm_to_lab(n),
                              static_cast<Real>(TINY_NUMBER));
+	if (ifr==5) ir_5_after += std::max(ir_cm(n+ifr*nang)/cm_to_lab(n),static_cast<Real>(TINY_NUMBER));
+	if (ifr==5) fr_5_after += wmu_cosx*std::max(ir_cm(n+ifr*nang)/cm_to_lab(n),static_cast<Real>(TINY_NUMBER));
+	if (ifr==18) ir_18_after += std::max(ir_cm(n+ifr*nang)/cm_to_lab(n),static_cast<Real>(TINY_NUMBER));
+	if (ifr==18) fr_18_after += wmu_cosx*std::max(ir_cm(n+ifr*nang)/cm_to_lab(n),static_cast<Real>(TINY_NUMBER));	 
       }
     }
+    // //write diff into user mesh block data
+    // pmb->user_out_var(17,k,j,i) += ir_5_after - ir_5_before;
+    // pmb->user_out_var(18,k,j,i) += ir_18_after - ir_18_before;
+    // pmb->user_out_var(19,k,j,i) += fr_5_after - fr_5_before;
+    // pmb->user_out_var(20,k,j,i) += fr_18_after - fr_18_before;
   } else {
     for (int ifr=0; ifr<nfreq; ++ifr) {
       lab_ir = &(ir(k,j,i,nang*ifr));
@@ -503,6 +667,14 @@ void RadIntegrator::GetHydroSourceTerms(MeshBlock *pmb,
           delta_frx += delta_source(1,ifr);
           delta_fry += delta_source(2,ifr);
           delta_frz += delta_source(3,ifr);
+	  if (ifr==5){
+            pmb->user_out_var(17,k,j,i) += (prat*delta_source(0,ifr) * invredfactor);
+            pmb->user_out_var(18,k,j,i) += (prat*delta_source(1,ifr) * invredc);
+          }
+          if (ifr==18){
+            pmb->user_out_var(19,k,j,i) += (prat*delta_source(0,ifr) * invredfactor);
+            pmb->user_out_var(20,k,j,i) += (prat*delta_source(1,ifr) * invredc);
+          }
         }
 
         // Now apply the radiation source terms to gas with energy and
@@ -511,6 +683,7 @@ void RadIntegrator::GetHydroSourceTerms(MeshBlock *pmb,
         rad_source(1,k,j,i) = (-prat*delta_frx * invredc);
         rad_source(2,k,j,i) = (-prat*delta_fry * invredc);
         rad_source(3,k,j,i) = (-prat*delta_frz * invredc);
+	
       }
     }
   }
@@ -526,7 +699,7 @@ void RadIntegrator::AddSourceTerms(MeshBlock *pmb, AthenaArray<Real> &u) {
 
   int is = pmb->is; int js = pmb->js; int ks = pmb->ks;
   int ie = pmb->ie; int je = pmb->je; int ke = pmb->ke;
-
+  
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
@@ -577,4 +750,5 @@ void RadIntegrator::AddSourceTerms(MeshBlock *pmb, AthenaArray<Real> &u) {
       }
     }
   }
+  
 }

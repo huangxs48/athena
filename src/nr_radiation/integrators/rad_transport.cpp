@@ -721,6 +721,17 @@ void RadIntegrator::FluxDivergence(const Real wght, AthenaArray<Real> &ir_in,
         for (int n=0; n<prad->n_fre_ang; ++n) {
           flxn[n] = (x1area(i+1) *flxr[n] - x1area(i)*flxl[n]);
         }
+	//save for ifr=5, ifr=18, flx term
+
+	for (int n=0; n<prad->nang; ++n){
+	  int n_freq_ang_5 = 5*prad->nang+n;
+	  pmb->ruser_meshblock_data[2](0,k,j,i) = x1area(i+1) *flxr[n_freq_ang_5];
+	  pmb->ruser_meshblock_data[2](1,k,j,i) = x1area(i)*flxl[n_freq_ang_5];
+	  int n_freq_ang_18 = 18*prad->nang+n;
+	  pmb->ruser_meshblock_data[2](2,k,j,i) = x1area(i+1) *flxr[n_freq_ang_18];
+	  pmb->ruser_meshblock_data[2](3,k,j,i) = x1area(i)*flxl[n_freq_ang_18];
+	}
+	  
       }
 
       // calculate x2-flux
@@ -757,18 +768,45 @@ void RadIntegrator::FluxDivergence(const Real wght, AthenaArray<Real> &ir_in,
         Real *iro = &(ir_out(k,j,i,0));
         Real *flxn = &(dflx(i,0));
         for (int n=0; n<prad->n_fre_ang; ++n) {
+	  //check wght, only include stage 2
           iro[n] = std::max(irin[n]-wght*flxn[n]/vol(i), static_cast<Real>(TINY_NUMBER));
         }
+	//save for ifr=5, ifr=18, flx term
+
+	//initialize flux moment (only in radial direction)
+	Real delta_flux_5 = 0.0;
+	Real delta_flux_18 = 0.0;
+	//loop over angles for ifr=5 and ifr=18
+	for (int n=0; n<prad->nang; ++n){
+	  int n_freq_ang_5 = 5*prad->nang+n;
+	  int n_freq_ang_18 = 18*prad->nang+n;
+	  pmb->ruser_meshblock_data[0](2,k,j,i) += -wght*flxn[n_freq_ang_5]/vol(i);
+	  pmb->ruser_meshblock_data[0](3,k,j,i) += -wght*flxn[n_freq_ang_18]/vol(i);
+	  //only accumulate source at the last stage in the time integration scheme
+	  //if (fabs(wght/pmb->pmy_mesh->dt-1.0)<1.0e-10){
+	    pmb->user_out_var(9,k,j,i) += -wght*flxn[n_freq_ang_5]/vol(i);
+	    pmb->user_out_var(10,k,j,i) += -wght*flxn[n_freq_ang_18]/vol(i);
+	  //}
+	  //try save flux too
+	  //weight of domega*cos(mu)_x
+	  Real wmu_cosx = prad->mu(0,k,j,i,n) * prad->wmu(n);
+	  //accumulate r direction flux change due to intencity change 
+	  delta_flux_5 += wmu_cosx * (-wght*flxn[n_freq_ang_5]/vol(i));
+	  delta_flux_18 += wmu_cosx * (-wght*flxn[n_freq_ang_18]/vol(i)); 
+	}
+	//only accumulate source at the last stage in the time integration scheme
+	//if (fabs(wght/pmb->pmy_mesh->dt-1.0)<1.0e-10){
+	  pmb->user_out_var(11,k,j,i) += delta_flux_5;
+	  pmb->user_out_var(12,k,j,i) += delta_flux_18;
+	  //}
+	
       }
 
       // add angular flux
       if ((prad->angle_flag == 1) && (imp_ang_flx_ == 0)) {
         for (int i=is; i<=ie; ++i) {
           for (int ifr=0; ifr<nfreq; ++ifr) {
-            int nlimit = prad->nang;
-            if(prad->polar_angle)
-              nlimit=prad->nang-2;
-            for (int n=0; n<nlimit; ++n)
+            for (int n=0; n<prad->nang; ++n)
               dflx_ang(n) = 0.0;
             if (nzeta * npsi > 0) {
               for (int m=0; m<2*npsi; ++m) {
@@ -812,7 +850,7 @@ void RadIntegrator::FluxDivergence(const Real wght, AthenaArray<Real> &ir_in,
             Real *iro = &(ir_out(k,j,i,ifr*nang));
             Real *flxn = &(dflx_ang(0));
             Real *angv = &(ang_vol(0));
-            for (int n=0; n<nlimit; ++n) {
+            for (int n=0; n<prad->nang; ++n) {
               iro[n] = std::max(iro[n]-wght*flxn[n]/angv[n],
                                 static_cast<Real>(TINY_NUMBER));
             }
@@ -832,10 +870,7 @@ void RadIntegrator::FluxDivergence(const Real wght, AthenaArray<Real> &ir_in,
             Real *p_angflx  = &(ang_flx_(k,j,i,ifr*nang));
             Real *iro = &(ir_out(k,j,i,ifr*nang));
             Real *ang_coef = &(imp_ang_coef_(k,j,i,0));
-            int nlimit=nang;
-            if(prad->polar_angle)
-              nlimit=nang-2;
-            for (int n=0; n<nlimit; ++n) {
+            for (int n=0; n<nang; ++n) {
               iro[n] += p_angflx[n];
               iro[n] /= (1.0 + ang_coef[n]);
             }
