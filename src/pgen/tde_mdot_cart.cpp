@@ -774,6 +774,20 @@ void GeneralNewtonianPotentialCart(MeshBlock *pmb, const Real time, const Real d
 	  
 	  cons(IEN,k,j,i) += dt * ax * rho * prim(IVX,k,j,i);
 	  cons(IEN,k,j,i) += dt * ay * rho * prim(IVY,k,j,i) + dt * az * rho * prim(IVZ,k,j,i);
+
+	  // //change to conserving internal energy
+	  // //current internal energy
+	  // Real etot_now = cons(IEN,k,j,i);
+	  // Real ke_now = 0.5*(1.0/cons(IDN,k,j,i))*(SQR(cons(IM1,k,j,i)) + SQR(cons(IM2,k,j,i)) + SQR(cons(IM3,k,j,i)));
+	  // Real ie_now = etot_now - ke_now;
+
+	  // Real im1_update = cons(IM1,k,j,i) + dt * rho * acc1;
+	  // Real im2_update = cons(IM2,k,j,i) + dt * rho * acc2;
+	  // Real im3_update = cons(IM3,k,j,i) + dt * rho * acc3;
+	
+	  // Real ek_update = 0.5*(1.0/cons(IDN,k,j,i))*(SQR(im1_update) + SQR(im2_update) + SQR(im3_update));
+	  // cons(IEN,k,j,i) = ie_now + ek_update;
+	  
 	}
 
       }
