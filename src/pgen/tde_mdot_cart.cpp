@@ -43,6 +43,7 @@ static Real r_isco;
 
 //Injection point
 static Real x_inj, y_inj, z_inj, local_dens, local_vx, local_vy, local_vz, local_press;
+int inj_print_flag;
 //Initialize domain
 static Real rho_init, press_init;
 static Real temp_stream;
@@ -208,6 +209,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   local_vx = pin->GetReal("problem", "local_vx");
   local_vy = pin->GetReal("problem", "local_vy");
   local_vz = pin->GetReal("problem", "local_vz");
+  inj_print_flag = pin->GetOrAddInteger("problem", "inj_print_flag", 0);
   //local_press = pin->GetReal("problem", "local_press");
   rho1_flag = pin->GetOrAddInteger("problem", "rho1_flag", 0);
 
@@ -832,7 +834,9 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	  //								    cos(th_coord)*cos(th_inj))); //real distance from injection point
                                                                                                         // (fc) to injection cell (vc)
 	  Real dist = d_inj;
-	  //printf("boundary: x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
+	  if (inj_print_flag==1){
+	    printf("boundary: x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
+	  }
 
 	   prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
 	   prim(IVX,k,j,ie+i) = local_vx; 
