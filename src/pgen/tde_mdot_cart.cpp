@@ -1127,7 +1127,7 @@ void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir<0, inward: mu_dir>0
-      Real mu_dir = prad->mu(0,k,j,is-i,ang);
+      Real mu_dir = prad->mu(0,k,j,is,n);
       if (mu_dir < 0.0){
 	ir(k,j,is-i,ang) = ir(k,j,is,ang);
       }else{
@@ -1152,11 +1152,11 @@ void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir>0, inward: mu_dir<0
-      Real mu_dir = prad->mu(0,k,j,ie+i,ang);
+      Real mu_dir = prad->mu(0,k,j,ie,n);
       if (mu_dir > 0.0){
 	ir(k,j,ie+i,ang) = ir(k,j,ie,ang);
       }else{
-       	ir(k,j,ie+i,ang) = 0.0;
+       ir(k,j,ie+i,ang) = 0.0;
       }
     }// end n
   }// end ifr
@@ -1182,7 +1182,7 @@ void RadInnerX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir<0, inward: mu_dir>0
-      Real mu_dir = prad->mu(1,k,js-j,i,ang);
+      Real mu_dir = prad->mu(1,k,js-j,i,n);
       if (mu_dir < 0.0){
 	ir(k,js-j,i,ang) = ir(k,js,i,ang);
       }else{
@@ -1207,7 +1207,7 @@ void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir>0, inward: mu_dir<0
-      Real mu_dir = prad->mu(1,k,je+j,i,ang);
+      Real mu_dir = prad->mu(1,k,je+j,i,n);
       if (mu_dir > 0.0){
 	ir(k,je+j,i,ang) = ir(k,je,i,ang);
       }else{
@@ -1236,7 +1236,7 @@ void RadInnerX3(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir<0, inward: mu_dir>0
-      Real mu_dir = prad->mu(2,ks-k,j,i,ang);
+      Real mu_dir = prad->mu(2,ks-k,j,i,n);
       if (mu_dir < 0.0){
 	ir(ks-k,j,i,ang) = ir(ks,j,i,ang);
       }else{
@@ -1261,7 +1261,7 @@ void RadOuterX3(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir>0, inward: mu_dir<0
-      Real mu_dir = prad->mu(2,ke+k,j,i,ang);
+      Real mu_dir = prad->mu(2,ke+k,j,i,n);
       if (mu_dir > 0.0){
 	ir(ke+k,j,i,ang) = ir(ke,j,i,ang);
       }else{
