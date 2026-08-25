@@ -55,7 +55,7 @@ static Real boundary_temp_lim; //optional, temperature uplimit at boundary
 Real boundary_temp_inj; //when multi-group, option to control boundary temperature
 
 //prescribed wind base density, density profile index, total mdot
-static Real rho_wind_base, rho_wind_index, mdot_wind, r_wind_in, vel_wind_base;
+static Real rho_wind_base, rho_wind_index, mdot_wind, r_wind_in, vel_wind_base, temp_wind_base;
 static Real lum_trapping; //assumed luminosity at trapping radius
 static Real lum_base; //luminosity corresponding to the flux at boundary
 static Real t_lum_base_ramp; //timescale for flux and mdot to ramp up
@@ -183,6 +183,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   rho_wind_index = pin->GetOrAddReal("problem", "rho_wind_index", -2.0);
   //r_wind_in = pin->GetOrAddReal("problem", "r_wind_in", 0.1);
   vel_wind_base = pin->GetOrAddReal("problem", "vel_wind_base", 1.0);
+  temp_wind_base = pin->GetOrAddReal("problem", "temp_wind_base", 1.0);
   mdot_wind = pin->GetOrAddReal("problem", "mdot_wind", 1.0);
   lum_trapping = pin->GetOrAddReal("problem", "lum_trapping", 0.0);
   lum_base = pin->GetOrAddReal("problem", "lum_base", 0.0);
@@ -319,7 +320,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   if (NR_RADIATION_ENABLED){
     if (pnrrad->nfreq==1){
       if (opacity_type=="table"){
-	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(FreeFreeOpacity);
+	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);//(GetCombineOpacity);//
       }else if (opacity_type=="freefree"){
 	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
       }
@@ -732,7 +733,8 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	//   fedd_is = (pr11_is/er_is); 
 	//   //printf("fedd: %g, er_is/pr22_is:%g, er_is/pr33_is:%g\n", fedd_is, er_is/pr22_is, er_is/pr33_is);
 	// }
-	
+
+	//think? might want to force er_is ~ trad_base^4
 	Real er_local = er_is + fedd_is * sigma_local * dr * frad_local;
 	// if (i==1)
 	//   printf("er_is=%g, pr11_is=%g, dr=%g, rho_local=%g, frad_local=%g, sigma_local=%g\n", er_is, pr11_is, dr, rho_local, frad_local, sigma_local);
@@ -849,31 +851,32 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	//use is value to be consistent with flux
 	Real r_now = pco->x1f(is);
 
-	//Real rho_now = rho_wind_base;
+	Real rho_now = rho_wind_base;
 	Real vel_now = vel_wind_base;
-	Real mdot_wind_now = mdot_wind;
+	
 	Real lum_base_now = lum_base;
 	if (time>0.0 && time<t_lum_base_ramp){
-	   mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
+	   rho_now = rho_wind_base * (1.0 - exp(-time/t_lum_base_ramp));
 	   lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
 	}
-	//Real vel_now = mdot_wind_now / rho_now / (4.0*PI*r_now*r_now);
 	
-	Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
+	//Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
 	//printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g\n", mdot_wind_now, rho_now, vel_now, r_now);
 
 	//estimate gas temperature
-	Real mass_load_wind = mdot_wind_now / vel_now;
 	Real temp_now = press_init/rho_init;
-	
-	if (NR_RADIATION_ENABLED){
-	  //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
-	  Real kappa_es_code = kappa_es * rho_unit * l_unit; 
-	  Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
-	  temp_now = pow(tgas4, 0.25) ;
+	if (temp_wind_base != 1.0){
+	  temp_now = temp_wind_base;
 	}
+	
+	// if (NR_RADIATION_ENABLED){
+	//   //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
+	//   Real kappa_es_code = kappa_es * rho_unit * l_unit; 
+	//   Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
+	//   temp_now = pow(tgas4, 0.25) ;
+	// }
 
-	if (boundary_constraint_flag==0){
+	if (boundary_constraint_flag==1){
 	  prim(IDN,k,j,is-i) = rho_now; 
 	  prim(IVX,k,j,is-i) = vel_now;
 	  prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
@@ -881,7 +884,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	  if (NON_BAROTROPIC_EOS){
 	    prim(IPR,k,j,is-i) =  std::max(temp_now*rho_now, boundary_temp_lim/temp_unit * prim(IDN,k,j,is)); 
 	  }
-	}else{
+	}else{//almost a outflow boundary
 	  prim(IDN,k,j,is-i) = rho_now; 
 	  prim(IVX,k,j,is-i) = prim(IVX,k,j,is);
 	  prim(IVZ,k,j,is-i) = prim(IVZ,k,j,is);
