@@ -183,12 +183,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   rho_wind_index = pin->GetOrAddReal("problem", "rho_wind_index", -2.0);
   //r_wind_in = pin->GetOrAddReal("problem", "r_wind_in", 0.1);
   vel_wind_base = pin->GetOrAddReal("problem", "vel_wind_base", 1.0);
-  temp_wind_base = pin->GetOrAddReal("problem", "temp_wind_base", 1.0);
+  temp_wind_base = pin->GetOrAddReal("problem", "temp_wind_base", -1.0);
   mdot_wind = pin->GetOrAddReal("problem", "mdot_wind", 1.0);
   lum_trapping = pin->GetOrAddReal("problem", "lum_trapping", 0.0);
   lum_base = pin->GetOrAddReal("problem", "lum_base", 0.0);
   t_lum_base_ramp = pin->GetOrAddReal("problem", "t_lum_base_ramp", 1.0);
-  boundary_temp_inj = pin->GetOrAddReal("problem", "boundary_temp_inj", -1.0);
+  //boundary_temp_inj = pin->GetOrAddReal("problem", "boundary_temp_inj", -1.0);
   boundary_constraint_flag = pin->GetOrAddInteger("problem" ,"boundary_constraint_flag", 0);
 
   //opacity
@@ -320,7 +320,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   if (NR_RADIATION_ENABLED){
     if (pnrrad->nfreq==1){
       if (opacity_type=="table"){
-	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);//(GetCombineOpacity);//
+	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//
       }else if (opacity_type=="freefree"){
 	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
       }
@@ -777,7 +777,8 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	    Real muz = pnrrad->mu(2,k,j,is-i,n);
 	    fr_now += wmu * mux * ir(k,j,is-i,n);
 	  }
-	  printf("i=%d, fr(is-i):%g, fr_local:%g\n", i, fr_now, frad_local);
+	  //printf("i=%d, fr(is-i):%g, fr_local:%g\n", i, fr_now, frad_local);
+	  
 	}else{
 	  //multigroup, set the shape of BB at base corresponding to temperature temp_now
 	  //assuming every frequency bin has the same angular distribution
@@ -803,16 +804,17 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  Real mass_load_wind = mdot_wind_now / vel_now;
 	
 	  if (NR_RADIATION_ENABLED){
-	    //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
-	    Real kappa_es_code = kappa_es * rho_unit * l_unit; 
-	    Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
-	    Real temp_now = std::pow(tgas4, 1.0/4.0);
-	    if (boundary_temp_inj>0.0){
-	      temp_now = boundary_temp_inj;
+
+	    Real temp_now;
+	    if (temp_wind_base>0.0){
+	      temp_now = temp_wind_base;
+	    }else{
+	      Real kappa_es_code = kappa_es * rho_unit * l_unit; 
+	      Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
+	      temp_now = std::pow(tgas4, 1.0/4.0);
 	    }
 	    
 	    //first calculate flux and energy fraction assuming black-body shape
-	    temp_now = pow(tgas4, 0.25) ;
 	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr) {
 	      Real frac = 0.0;
 	      if (ifr==nfreq-1){
@@ -865,7 +867,7 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 
 	//estimate gas temperature
 	Real temp_now = press_init/rho_init;
-	if (temp_wind_base != 1.0){
+	if (temp_wind_base > 0.0){
 	  temp_now = temp_wind_base;
 	}
 	
