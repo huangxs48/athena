@@ -495,7 +495,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
 	//assuming a low density background gas
 	Real rho_now = rho_init;
-	Real temp_now = press_init;
+	Real temp_now = press_init/rho_init;
 
         phydro->u(IDN,k,j,i) = rho_now;
         phydro->u(IM1,k,j,i) = 0.0; //vel_now;
@@ -529,13 +529,13 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	      Real kappa_ff_cgs;
 
 	      //hard coded for now
-	      Real nu_now = pnrrad->nu_grid(ifr);
+	      Real nu_now = pnrrad->nu_grid(ifr) * pnrrad->fre_ratio;
 	      if (ifr==0)
-		nu_now = pnrrad->nu_min;
+		nu_now = pnrrad->nu_min / pnrrad->fre_ratio; //at hypothetical left center
 	      Real nu_hz= nu_now / (h_planck/(k_b * pnrrad->tunit));
 
 	      kappa_ff_cgs = kappa_ff_nu(nu_hz, temp, rho);
-    
+
 	      pnrrad->sigma_s(k,j,i,ifr) = kappa_s * rho * rho_unit * l_unit; 
 	      pnrrad->sigma_a(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit; 
 	      pnrrad->sigma_pe(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
@@ -545,7 +545,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 	    
 	    kappa_ross = kappa_ff_ross(temp, rho);
 	    kappa_planck = kappa_ff_planck(temp, rho);
-	    //one frequency, grey rhd for now
 	    pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
 	    pnrrad->sigma_a(k,j,i,0) = kappa_ross * rho * rho_unit * l_unit; //rosseland mean
 	    pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
@@ -555,9 +554,22 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
 	  //initialize intensity
 	  for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
+	    Real frac = 0.0;
+	    //Real nu_low = (ifr == 0) ? pnrrad->nu_min : pnrrad->nu_grid(ifr);
+	    if (pnrrad->nfreq==1){
+	      frac = 1.0;
+	    }else{
+	      Real nu_low = pnrrad->nu_grid(ifr);
+	      if (ifr==pnrrad->nfreq-1){
+		frac = (1.0-pnrrad->FitIntPlanckFunc(nu_low/temp_now));
+	      }else{
+		frac = pnrrad->IntPlanckFunc(nu_low/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
+	      }
+	    }
+	    
 	    for(int n=0; n<pnrrad->nang; ++n){
 	      int ang=ifr*pnrrad->nang+n;
-	      pnrrad->ir(k,j,i,ang) = pow(temp, 4);//use temp_now^4 if assuming initial trad=tgas
+	      pnrrad->ir(k,j,i,ang) = frac * pow(temp_now, 4);//use temp_now^4 if assuming initial trad=tgas
 	    }
 	  }
      
@@ -714,15 +726,18 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	Real pr11_is = 0.0;
 	//Real pr22_is = 0.0;
 	//Real pr33_is = 0.0;
-	for (int n=0; n<pnrrad->nang; ++n){//for single band
-	  Real wmu = pnrrad->wmu(n);
-	  Real mux = pnrrad->mu(0,k,j,is,n);
-	  Real muy = pnrrad->mu(1,k,j,is,n);
-	  Real muz = pnrrad->mu(2,k,j,is,n);
-	  er_is += wmu * ir(k,j,is,n);
-	  pr11_is += wmu * mux * mux * ir(k,j,is,n);
-	  //pr22_is += wmu * muy * muy * ir(k,j,is,n);
-	  //pr33_is += wmu * muz * muz * ir(k,j,is,n);
+	for (int ifr=0; ifr>pnrrad->nfreq; ++ifr){
+	  for (int n=0; n<pnrrad->nang; ++n){
+	    int ang = ifr*pnrrad->nang + n;
+	    Real wmu = pnrrad->wmu(n);
+	    Real mux = pnrrad->mu(0,k,j,is,n);
+	    //Real muy = pnrrad->mu(1,k,j,is,ang);
+	    //Real muz = pnrrad->mu(2,k,j,is,ang);
+	    er_is += wmu * ir(k,j,is,ang);
+	    pr11_is += wmu * mux * mux * ir(k,j,is,ang);
+	    //pr22_is += wmu * muy * muy * ir(k,j,is,ang);
+	    //pr33_is += wmu * muz * muz * ir(k,j,is,ang);
+	  }
 	}
 	
         //Real er_is = pmb->pnrrad->rad_mom(IER,k,j,is);
@@ -817,10 +832,11 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	    //first calculate flux and energy fraction assuming black-body shape
 	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr) {
 	      Real frac = 0.0;
+	      Real nu_low = (ifr == 0) ? pnrrad->nu_min : pnrrad->nu_grid(ifr);
 	      if (ifr==nfreq-1){
-		frac = (1.0-pnrrad->FitIntPlanckFunc(pnrrad->nu_grid(ifr)/temp_now));
+		frac = (1.0-pnrrad->FitIntPlanckFunc(nu_low/temp_now));
 	      }else{
-		frac = pnrrad->IntPlanckFunc(pnrrad->nu_grid(ifr)/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
+		frac = pnrrad->IntPlanckFunc(nu_low/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
 	      }
 	      //loop over angles, assign intensity
 	      for (int n=0; n<pnrrad->nang; ++n){
@@ -904,26 +920,28 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 
 }
 
-//input code unit, output cgs
+//temp, rho input code unit, nu input in hz, output cgs
 Real kappa_ff_nu(Real nu, Real temp, Real rho){
 
   Real h_planck = 6.626196e-27 ;
-  Real evtohz = 2.41838e14;
+  //Real evtohz = 2.41838e14;
   Real rho_cgs = rho*rho_unit;
   Real temp_cgs =  temp*temp_unit;
   Real m_p = 1.6726e-24;
   Real k_B = 1.3807e-16;
   
   Real  gff = 1.0;
-  Real  z = 1.0;
+  //Real  z = 1.0;
 
-  Real  he_adbund = 0.04;
+  Real  he_adbund = 0.04; //He number density, hard coded for now
   Real  nh = rho_cgs/m_p/(1.0 + 4.0*he_adbund);
   Real  nhe = nh*he_adbund;
   Real  ne = nh + 2.0*nhe;
-  Real  num_rho = rho_cgs/m_p/0.62;
+  //Real  num_rho = rho_cgs/m_p/0.62;
+  Real charge_ion_density = nh + 4.0*nhe;
 
-  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(num_rho, 2) * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
+  //Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * pow(z, 2) * pow(num_rho,2)  * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
+  Real  e_ff = 3.7e8 * pow(temp_cgs, -0.5) * (ne * charge_ion_density)  * pow(nu, -3) * (1.0 - exp(-h_planck*nu/k_B/temp_cgs)) * gff;
 
   return e_ff/rho_cgs;
 }
@@ -972,19 +990,18 @@ void Multi_FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
 
     Real kappa_ff_cgs;
 
-    Real rho_cgs = rho * rho_unit;
-    Real tgas_cgs = tgas * temp_unit;
+    //Real rho_cgs = rho * rho_unit;
+    //Real tgas_cgs = tgas * temp_unit;
 
-    //hard coded for now
-    Real nu_now = prad->nu_grid(ifr);
+    Real nu_now = prad->nu_grid(ifr) * sqrt(prad->fre_ratio); //evaluates at bin center
     if (ifr==0)
-      nu_now = prad->nu_min;
+      nu_now = prad->nu_min / prad->fre_ratio; //evaluteas at hypothetical left center
     Real nu_hz= nu_now / (h_planck/(k_b * prad->tunit));
 
     kappa_ff_cgs = kappa_ff_nu(nu_hz, tgas, rho);
 
     prad->sigma_s(k,j,i,ifr) = kappa_es * rho * rho_unit * l_unit; 
-    //assuming planck mean and rossland mean are same, make change to adapt your problem
+    //assuming planck mean and rossland mean are same
     prad->sigma_a(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit; 
     prad->sigma_pe(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
     prad->sigma_p(k,j,i,ifr) = kappa_ff_cgs * rho * rho_unit *l_unit;
@@ -1039,7 +1056,7 @@ void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 
 }
 
- //planck mean free free absorption
+//planck mean free free absorption
 Real kappa_ff_planck(Real temp, Real rho){
   Real rho_cgs = rho*rho_unit;
   Real temp_cgs =  temp*temp_unit;
