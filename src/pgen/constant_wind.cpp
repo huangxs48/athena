@@ -697,12 +697,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
     for (int j=js; j<=je; ++j) {
       for (int i=1; i<=ngh; ++i) {
   
-	//try use cell-center values
-	Real rho_local = w(IDN,k,j,is);//(w(IDN,k,j,is) + w(IDN,k,j,is-i))/2.0;
-	Real sigma_local = 0.0;
-	if (time>0.0)
-	  sigma_local = pnrrad->sigma_a(k,j,is,0);
-	
+	//use cell-center values
 	Real dr = pco->dx1f(is);
 	Real r_local = pco->x1f(is);
 
@@ -712,146 +707,98 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	//add a grandually increasing factor
 	if (time>0.0 && time<t_lum_base_ramp){
 	    frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
-	    //printf("frad_now:%g\n", frad_local);
 	}
 
+	//assumed temperature, only used for multigroup case to set injected SED shape
+	Real temp_now;
+	if (temp_wind_base>0.0){
+	  temp_now = temp_wind_base;
+	  //printf("temp_now:%g, temp_is:%g\n", temp_now, w(IPR,k,j,is)/w(IDN,k,j,is));
+	}else{
+	  temp_now = w(IPR,k,j,is)/w(IDN,k,j,is);
+	  //printf("temp_now:%g\n", temp_now);
+	}
+	    
 	// //initialze moment array
 	// if (time==0.0){
 	//   pmb->pnrrad->CalculateMoment(pmb->pnrrad->ir);
 	// }
 
-	//get coefficient between Prr_rad/Erad, close to 1/3. when isotropic
-	//energy density of first active cell
-	Real er_is = 0.0;
-	Real pr11_is = 0.0;
-	//Real pr22_is = 0.0;
-	//Real pr33_is = 0.0;
-	for (int ifr=0; ifr>pnrrad->nfreq; ++ifr){
+	//coefficient between Prr_rad/Erad, close to 1/3. when isotropic
+	//this is a simplified assumption
+	Real fedd_is = 3.0;
+
+	//----------------------------------------------
+	//assign intensities, main loop over frequencies
+
+	Real count_frac=0.0;//debug variable
+	for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
+
+	  //get intensity coefficients per frequency group
+	  Real coefa_u = 0.0, coefb_u = 0.0;
+	  Real coefa_d = 0.0, coefb_d = 0.0;
+	  for (int n=0; n<pnrrad->nang; ++n) {
+	    Real mux = pnrrad->mu(0,k,j,is,ifr*pnrrad->nang+n);
+	    Real weight = pnrrad->wmu(n);
+	    if (mux > 0.0){
+	      coefa_u += weight;
+	      coefb_u += mux * weight;
+	    } else {
+	      coefa_d += weight;
+	      coefb_d += mux * weight;
+	    }
+	  }//end coef angle loop
+
+	  //oapcity of current cell, assuming using first active cell
+	  Real sigma_local_ifr = 0.0;
+	  if (time>0.0)
+	    sigma_local_ifr = pnrrad->sigma_a(k,j,is,ifr);
+	
+	  //energy density of first active cell
+	  Real er_is_ifr = 0.0;
+	  Real pr11_is_ifr = 0.0;
+	  
+	  //loop over angle to fill current frequency's first active zone energy
 	  for (int n=0; n<pnrrad->nang; ++n){
 	    int ang = ifr*pnrrad->nang + n;
 	    Real wmu = pnrrad->wmu(n);
-	    Real mux = pnrrad->mu(0,k,j,is,n);
+	    Real mux = pnrrad->mu(0,k,j,is,ifr*pnrrad->nang+n);
 	    //Real muy = pnrrad->mu(1,k,j,is,ang);
 	    //Real muz = pnrrad->mu(2,k,j,is,ang);
-	    er_is += wmu * ir(k,j,is,ang);
-	    pr11_is += wmu * mux * mux * ir(k,j,is,ang);
+	    er_is_ifr += wmu * ir(k,j,is,ang);
+	    pr11_is_ifr += wmu * mux * mux * ir(k,j,is,ang);
 	    //pr22_is += wmu * muy * muy * ir(k,j,is,ang);
 	    //pr33_is += wmu * muz * muz * ir(k,j,is,ang);
 	  }
-	}
-	
-        //Real er_is = pmb->pnrrad->rad_mom(IER,k,j,is);
-	//Real pr11_is = pmb->pnrrad->rad_mom(IPR11,k,j,is);
-	Real fedd_is = 3.0;
-	
-	// if (time > 0.0 and er_is >0.0 and pr11_is>0.0){
-	//   fedd_is = (pr11_is/er_is); 
-	//   //printf("fedd: %g, er_is/pr22_is:%g, er_is/pr33_is:%g\n", fedd_is, er_is/pr22_is, er_is/pr33_is);
-	// }
-
-	//think? might want to force er_is ~ trad_base^4
-	Real er_local = er_is + fedd_is * sigma_local * dr * frad_local;
-	// if (i==1)
-	//   printf("er_is=%g, pr11_is=%g, dr=%g, rho_local=%g, frad_local=%g, sigma_local=%g\n", er_is, pr11_is, dr, rho_local, frad_local, sigma_local);
-
-	//get intensity coefficients
-	Real coefa_u = 0.0, coefb_u = 0.0;
-	Real coefa_d = 0.0, coefb_d = 0.0;
-
-	for (int n=0; n<pnrrad->nang; ++n) {
-	  Real mux = pnrrad->mu(0,k,j,is,n);
-	  Real weight = pnrrad->wmu(n);
-	  if (mux > 0.0){
-	    coefa_u += weight;
-	    coefb_u += mux * weight;
-	  } else {
-	    coefa_d += weight;
-	    coefb_d += mux * weight;
+	  
+	  //calcualte fraction of current frequency bin
+	  Real frac = 0.0;
+	  if (pnrrad->nfreq==1){ //grey 
+	    frac = 1.0;
+	  }else{ //multigroup
+	    Real nu_low = (ifr == 0) ? pnrrad->nu_min : pnrrad->nu_grid(ifr);
+	    if (ifr==pnrrad->nfreq-1){
+	      frac = (1.0-pnrrad->FitIntPlanckFunc(nu_low/temp_now));
+	    }else{
+	      frac = pnrrad->IntPlanckFunc(nu_low/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
+	    }
+	    count_frac += frac;
 	  }
-	}//end angle
 
-	if (pnrrad->nfreq==1){
+	  Real fr_local_ifr = frac * frad_local;
+	  Real er_local_ifr = er_is_ifr + fedd_is * sigma_local_ifr * dr * fr_local_ifr;
+	  //loop over angles, assign intensity
 	  for (int n=0; n<pnrrad->nang; ++n){
-	    Real mux = pnrrad->mu(0,k,j,is-i,n);
+	    Real mux = pnrrad->mu(0,k,j,is-i,ifr*pnrrad->nang+n);
 	    if (mux > 0.0){
-	      ir(k,j,is-i,n) = 0.5 * (er_local/coefa_u + frad_local/coefb_u);
+	      ir(k,j,is-i,ifr*pnrrad->nang+n) = 0.5 * (er_local_ifr/coefa_u + fr_local_ifr/coefb_u);
 	    }else{
-	      ir(k,j,is-i,n) = 0.5 * (er_local/coefa_d + frad_local/coefb_d);
+	      ir(k,j,is-i,ifr*pnrrad->nang+n) = 0.5 * (er_local_ifr/coefa_d + fr_local_ifr/coefb_d);
 	    }
-	    //printf("nang=%d, k=%d, j=%d, i=%d, ir=%g, er_local=%g, frad_local=%g, coefa_u=%g, coefb_u=%g, coefa_d=%g, coefb_d=%g\n", n, k, j, i, ir(k,j,is-i, n), er_local, frad_local, coefa_u, coefb_u, coefa_d, coefb_d);
-	    // if (i==1 && (n==0||n==7))
-	    //   printf("nang=%d, i=%d, ir=%g, er_local=%g, frad_local=%g,  er_is=%g, pr11_is=%g, er/pr=%g\n", n, i, ir(k,j,is-i, n), er_local, frad_local,  er_is, pr11_is, er_is/pr11_is);
 	  }//end angle
-
-	  //debug
-	  Real fr_now = 0.0;
-	  for (int n=0; n<pnrrad->nang; ++n){//for single band
-	    Real wmu = pnrrad->wmu(n);
-	    Real mux = pnrrad->mu(0,k,j,is-i,n);
-	    Real muy = pnrrad->mu(1,k,j,is-i,n);
-	    Real muz = pnrrad->mu(2,k,j,is-i,n);
-	    fr_now += wmu * mux * ir(k,j,is-i,n);
-	  }
-	  //printf("i=%d, fr(is-i):%g, fr_local:%g\n", i, fr_now, frad_local);
 	  
-	}else{
-	  //multigroup, set the shape of BB at base corresponding to temperature temp_now
-	  //assuming every frequency bin has the same angular distribution
-	  int nfreq = pnrrad->nfreq;
-	  int nang = pnrrad->nang;
-
-	  //use is value to be consistent with flux
-	  Real r_now = pco->x1f(is);
-
-	  //Real rho_now = rho_wind_base;
-	  Real vel_now = vel_wind_base;
-	  Real mdot_wind_now = mdot_wind;
-	  Real lum_base_now = lum_base;
-	  if (time>0.0 && time<t_lum_base_ramp){
-	    mdot_wind_now = mdot_wind * (1.0 - exp(-time/t_lum_base_ramp));
-	    lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
-	  }
-	  
-	  Real rho_now = mdot_wind_now / vel_now / (4.0*PI*r_now*r_now);
-	  //printf("mdot_now:%g, rho_now:%g, vel_now:%g, r_now:%g\n", mdot_wind_now, rho_now, vel_now, r_now);
-	  
-	  //estimate gas temperature
-	  Real mass_load_wind = mdot_wind_now / vel_now;
-	
-	  if (NR_RADIATION_ENABLED){
-
-	    Real temp_now;
-	    if (temp_wind_base>0.0){
-	      temp_now = temp_wind_base;
-	    }else{
-	      Real kappa_es_code = kappa_es * rho_unit * l_unit; 
-	      Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
-	      temp_now = std::pow(tgas4, 1.0/4.0);
-	    }
-	    
-	    //first calculate flux and energy fraction assuming black-body shape
-	    for (int ifr=0; ifr<pnrrad->nfreq; ++ifr) {
-	      Real frac = 0.0;
-	      Real nu_low = (ifr == 0) ? pnrrad->nu_min : pnrrad->nu_grid(ifr);
-	      if (ifr==nfreq-1){
-		frac = (1.0-pnrrad->FitIntPlanckFunc(nu_low/temp_now));
-	      }else{
-		frac = pnrrad->IntPlanckFunc(nu_low/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
-	      }
-	      //loop over angles, assign intensity
-	      for (int n=0; n<pnrrad->nang; ++n){
-		Real mux = pnrrad->mu(0,k,j,is-i,ifr*nang+n);
-		if (mux > 0.0){
-		  ir(k,j,is-i,ifr*nang+n) = 0.5 * frac * (er_local/coefa_u + frad_local/coefb_u);
-		}else{
-		  ir(k,j,is-i,ifr*nang+n) = 0.5 * frac * (er_local/coefa_d + frad_local/coefb_d);
-		}
-	      }//end angle
-	    }
-	    
-	  }
-
-	}//end nfreq>1
+	}
+	//----------------------------------------------
 	
       }//i
     }//j
@@ -883,16 +830,11 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 
 	//estimate gas temperature
 	Real temp_now = press_init/rho_init;
-	if (temp_wind_base > 0.0){
+	if (temp_wind_base>0.0){
 	  temp_now = temp_wind_base;
+	}else{
+	  temp_now = prim(IPR,k,j,is)/prim(IDN,k,j,is);
 	}
-	
-	// if (NR_RADIATION_ENABLED){
-	//   //(TODO) when mass_load_wind is too small, potentially numerical error by diving small number in tgas4 estimation. it is guarded by the boundary_temp_lim but could be better to have another handling for temp_now when mass_load_wind is small.
-	//   Real kappa_es_code = kappa_es * rho_unit * l_unit; 
-	//   Real tgas4 =  kappa_es_code * lum_base / mass_load_wind / pow(r_now, 3) / pow(4.0*PI, 2) / (pmb->pnrrad->crat*pmb->pnrrad->prat);
-	//   temp_now = pow(tgas4, 0.25) ;
-	// }
 
 	if (boundary_constraint_flag==1){
 	  prim(IDN,k,j,is-i) = rho_now; 
