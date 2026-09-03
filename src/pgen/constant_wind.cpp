@@ -711,12 +711,12 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 
 	//assumed temperature, only used for multigroup case to set injected SED shape
 	Real temp_now;
-	if (temp_wind_base>0.0){
-	  temp_now = temp_wind_base;
+	if (pnrrad->restart_from_gray){
+	  temp_now = w(IPR,k,j,is)/w(IDN,k,j,is);
 	  //printf("temp_now:%g, temp_is:%g\n", temp_now, w(IPR,k,j,is)/w(IDN,k,j,is));
 	}else{
-	  temp_now = w(IPR,k,j,is)/w(IDN,k,j,is);
-	  //printf("temp_now:%g\n", temp_now);
+	  temp_now = temp_wind_base;
+	  //printf("temp_now:%g, temp_is:%g\n", temp_now, w(IPR,k,j,is)/w(IDN,k,j,is));
 	}
 	    
 	// //initialze moment array
