@@ -647,7 +647,7 @@ void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir<0, inward: mu_dir>0
-      Real mu_dir = pnrrad->mu(0,k,j,is,ang);
+      Real mu_dir = pnrrad->mu(0,k,j,is,n);
       if (mu_dir < 0.0){
         ir(k,j,is-i,ang) = ir(k,j,is,ang);
       }else{
@@ -672,7 +672,7 @@ void RadOuterX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
     for(int n=0; n<nang; ++n){
       int ang=ifr*nang+n;
       //if directs outwards: mu_dir>0, inward: mu_dir<0
-      Real mu_dir = pnrrad->mu(0,k,j,ie,ang);
+      Real mu_dir = pnrrad->mu(0,k,j,ie,n);
       if (mu_dir > 0.0){
         ir(k,j,ie+i,ang) = ir(k,j,ie,ang);
       }else{
@@ -738,7 +738,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  Real coefa_u = 0.0, coefb_u = 0.0;
 	  Real coefa_d = 0.0, coefb_d = 0.0;
 	  for (int n=0; n<pnrrad->nang; ++n) {
-	    Real mux = pnrrad->mu(0,k,j,is,ifr*pnrrad->nang+n);
+	    Real mux = pnrrad->mu(0,k,j,is,n);
 	    Real weight = pnrrad->wmu(n);
 	    if (mux > 0.0){
 	      coefa_u += weight;
@@ -762,9 +762,9 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  for (int n=0; n<pnrrad->nang; ++n){
 	    int ang = ifr*pnrrad->nang + n;
 	    Real wmu = pnrrad->wmu(n);
-	    Real mux = pnrrad->mu(0,k,j,is,ifr*pnrrad->nang+n);
-	    //Real muy = pnrrad->mu(1,k,j,is,ang);
-	    //Real muz = pnrrad->mu(2,k,j,is,ang);
+	    Real mux = pnrrad->mu(0,k,j,is,n);
+	    //Real muy = pnrrad->mu(1,k,j,is,n);
+	    //Real muz = pnrrad->mu(2,k,j,is,n);
 	    er_is_ifr += wmu * ir(k,j,is,ang);
 	    pr11_is_ifr += wmu * mux * mux * ir(k,j,is,ang);
 	    //pr22_is += wmu * muy * muy * ir(k,j,is,ang);
@@ -789,7 +789,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	  Real er_local_ifr = er_is_ifr + fedd_is * sigma_local_ifr * dr * fr_local_ifr;
 	  //loop over angles, assign intensity
 	  for (int n=0; n<pnrrad->nang; ++n){
-	    Real mux = pnrrad->mu(0,k,j,is-i,ifr*pnrrad->nang+n);
+	    Real mux = pnrrad->mu(0,k,j,is-i,n);
 	    if (mux > 0.0){
 	      ir(k,j,is-i,ifr*pnrrad->nang+n) = 0.5 * (er_local_ifr/coefa_u + fr_local_ifr/coefb_u);
 	    }else{
