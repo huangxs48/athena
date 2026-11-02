@@ -196,6 +196,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   opacity_type = pin->GetOrAddString("problem", "opacity_type", "table");
   n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
   n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
+  n_rho_mg = pin->GetOrAddInteger("problem" ,"n_rho_mg", 100);
+  n_tem_mg = pin->GetOrAddInteger("problem" ,"n_tem_mg", 100);
 
   //frequency dependent opacity
   
@@ -1505,6 +1507,8 @@ void fre_rossopacity(const Real rho, const Real tgas, const int fre_group,
 
 void MultiOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
 {
+  //(TODO): make this consistent with interpolated opacity
+  
   NRRadiation *prad = pmb->pnrrad;
   Coordinates *pco = pmb->pcoord;
   int il = pmb->is; int jl = pmb->js; int kl = pmb->ks;
