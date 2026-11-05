@@ -68,6 +68,27 @@ static int disk_grav_flag;
 static Real grav_disk; //disk gravity
 static Real z_disk_mid;
 
+//opacity function and table
+std::string  opacity_file;
+std::string  opacity_type;
+static int n_tem;
+static int n_rho;
+Real kappa_es;
+
+//frequency integrated free free opacity
+Real kappa_ff_planck(Real temp, Real rho);
+Real kappa_ff_ross(Real temp, Real rho);
+void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+
+//frequency integrated opacity table
+static AthenaArray<Real> combine_temp_grid;
+static AthenaArray<Real> combine_rho_grid;
+static AthenaArray<Real> combine_ross_table;
+static AthenaArray<Real> combine_planck_table;
+void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
+void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+void ReadOpacityTable();
+
 void Phi_BH_DiskGrav(MeshBlock *pmb, const Real time, const Real dt, const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar, const AthenaArray<Real> &bcc, AthenaArray<Real> &cons, AthenaArray<Real> &cons_scalar);
 
 // User-defined boundary conditions for disk simulations
@@ -149,6 +170,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   vz_inj = pin->GetOrAddReal("problem", "vz_inj", 0.0);
 
   user_dt = pin->GetOrAddReal("problem", "user_dt", -1.0);
+
+  //opacity
+  kappa_es = pin->GetOrAddReal("problem", "kappa_es", 0.34);
+  opacity_file = pin->GetOrAddString("problem", "opacity_file", "None");
+  opacity_type = pin->GetOrAddString("problem", "opacity_type", "freefree");
+  n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
+  n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
   
   EnrollUserExplicitSourceFunction(Phi_BH_DiskGrav);
 
@@ -167,6 +195,20 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     if (mesh_bcs[BoundaryFace::outer_x2] == GetBoundaryFlag("user")) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x2, RadOuterX2);
     }
+  }
+
+  //load talbe 
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
+    //nfre = pin->GetOrAddInteger("radiation", "n_frequency", 1);
+    if (opacity_file != "None"){
+      //if (nfre>1){
+      //	MultiReadOpacityTable();
+      //}else{
+	ReadOpacityTable();
+	//}
+      
+    }//load opacity table
+
   }
   
   return;
@@ -202,6 +244,21 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   // SetUserOutputVariableName(3, "GravSrc_m2_IM2");
   // SetUserOutputVariableName(4, "GravSrc_m2_IM3");
   // SetUserOutputVariableName(5, "GravSrc_m2_IEN");
+
+  //enroll opacity function here
+  if (NR_RADIATION_ENABLED){
+    if (pnrrad->nfreq==1){
+      if (opacity_type=="table"){
+	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//
+      }else if (opacity_type=="freefree"){
+	pnrrad->EnrollOpacityFunction(FreeFreeOpacity);
+      }
+      if (Globals::my_rank==0)
+	std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
+	
+    }//otherwise  multigroup
+    
+  }
 
   return;
 }
@@ -350,6 +407,55 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
                                        + SQR(phydro->u(IM3,k,j,i)))/phydro->u(IDN,k,j,i);
 	}//end non barotropic
 
+	if (NR_RADIATION_ENABLED){
+
+	  //Real rho = rho_now;//phydro->w(IDN,k,j,i);
+	  Real temp_now = pgas_now / dens_now;
+	  //Real temp = temp_now;
+
+	  Real rho_cgs = dens_now * rho_unit;
+	  Real temp_cgs = temp_now * temp_unit;
+	  Real kappa_unit = 1.0 / rho_unit / l_unit;
+
+	  Real kappa_s, kappa_ross, kappa_planck;
+
+	  // electron scattering opacity, hard coded for now
+	  kappa_s = kappa_es;
+	  Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
+	  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
+
+	  //approximated, intiial use free-free opacity
+	  kappa_ross = kappa_ff_ross(temp_now, dens_now);
+	  kappa_planck = kappa_ff_planck(temp_now, dens_now);
+	  pnrrad->sigma_s(k,j,i,0) = dens_now * (kappa_s / kappa_unit); //scatter
+	  pnrrad->sigma_a(k,j,i,0) = dens_now * (kappa_ross / kappa_unit); //rosseland mean
+	  pnrrad->sigma_pe(k,j,i,0) = dens_now * (kappa_planck / kappa_unit); //planck mean
+	  pnrrad->sigma_p(k,j,i,0) = dens_now * (kappa_planck / kappa_unit);//planck mean
+
+
+	  //initialize intensity
+	  for (int ifr=0; ifr<pnrrad->nfreq; ++ifr){
+	    Real frac = 0.0;
+	    //Real nu_low = (ifr == 0) ? pnrrad->nu_min : pnrrad->nu_grid(ifr);
+	    if (pnrrad->nfreq==1){
+	      frac = 1.0;
+	    }else{
+	      Real nu_low = pnrrad->nu_grid(ifr);
+	      if (ifr==pnrrad->nfreq-1){
+		frac = (1.0-pnrrad->FitIntPlanckFunc(nu_low/temp_now));
+	      }else{
+		frac = pnrrad->IntPlanckFunc(nu_low/temp_now, pnrrad->nu_grid(ifr+1)/temp_now);
+	      }
+	    }
+	    
+	    for(int n=0; n<pnrrad->nang; ++n){
+	      int ang=ifr*pnrrad->nang+n;
+	      pnrrad->ir(k,j,i,ang) = frac * pow(temp_now, 4);//use temp_now^4 if assuming initial trad=tgas
+	    }
+	  }
+     
+	}//end rad
+	
         if (NSCALARS>0){ //scalar to mark the disk and stream, not used if not compiled with --nscalar=1
 	  pscalars->s(0,k,j,i) = phydro->u(IDN,k,j,i) * d0;
 	}
@@ -362,10 +468,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
   return;
 }
-
-/* utility functions */
-
-/* end utility functions */
 
 void Phi_BH_DiskGrav(MeshBlock *pmb, const Real time, const Real dt, const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar, const AthenaArray<Real> &bcc, AthenaArray<Real> &cons, AthenaArray<Real> &cons_scalar){
 
@@ -478,7 +580,7 @@ void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 
 }
 
-/*
+
 void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
         	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
@@ -504,4 +606,305 @@ void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
   return;
 
 }
-*/
+
+
+/* utility functions */
+void ReadOpacityTable(){
+    if (opacity_file!="None" && (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED)){
+      
+      //load combined opacity
+      combine_temp_grid.NewAthenaArray(n_tem);
+      combine_rho_grid.NewAthenaArray(n_rho);
+      combine_ross_table.NewAthenaArray(n_tem, n_rho);
+      combine_planck_table.NewAthenaArray(n_tem, n_rho);
+      
+      FILE *f_combineopacity;
+      
+      if ( (f_combineopacity=fopen(opacity_file.c_str(),"r"))==NULL )
+	{
+	  //printf("Open input file error combined opacity table %s\n", opacity_file.c_str());
+	  //return;
+	  std::stringstream msg;
+	  msg << "FATAL ERROR: Could not open opacity file "<< opacity_file.c_str() << std::endl;
+	  ATHENA_ERROR(msg);
+	}
+      
+      //first two lines are n_temp, n_rho
+      int buff;
+      for(int i=0; i<2; i++){
+	fscanf(f_combineopacity,"%d",&(buff));
+      }
+      
+      //load temperature grid
+      for(int i=0; i<n_tem; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
+      }
+      
+      //load density grid
+      for(int i=0; i<n_rho; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
+      }
+      
+      //load grey Rosseland mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+	}
+      }
+      
+      //load grey Planck mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+	}
+      }
+      
+      fclose(f_combineopacity);
+      
+      // printf("testing opacity table\n");
+      // Real kappa_p_test, kappa_r_test;
+      // combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
+      // printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
+    }
+
+}
+
+void FreeFreeOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
+
+  NRRadiation *pnrrad=pmb->pnrrad;
+  int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
+  //int kl=pmb->kl, ku=pmb->ku, js=pmb->jl, je=pmb->ju, is=pmb->il, ie=pmb->iu;
+  int il = is - NGHOST;
+  int iu = ie + NGHOST;
+  int jl=js, ju=je;
+  int kl=ks, ku=ke;
+  if (pmb->pmy_mesh->f2){
+    jl = js - NGHOST;
+    ju = je + NGHOST;
+  }
+  if (pmb->pmy_mesh->f3){
+    kl = ks - NGHOST;
+    ku = ke + NGHOST;
+  }
+
+  //printf("kappaes:%g\n", kappa_es);
+  for (int k=kl; k<=ku; k++){
+    for (int j=jl; j<=ju; j++){
+      for (int i=il; i<=iu; i++){
+	
+	Real rho = prim(IDN,k,j,i);
+	Real temp = prim(IPR,k,j,i)/prim(IDN,k,j,i); //std::max(prim(IPR,k,j,i)/prim(IDN,k,j,i), tfloor);
+	Real rho_cgs = rho*rho_unit;
+	Real temp_cgs = temp*temp_unit;
+	Real kappa_unit = 1.0 / rho_unit / l_unit;
+	
+	Real kappa_s, kappa_ross, kappa_planck;
+	kappa_s = kappa_es;
+	kappa_ross = kappa_ff_ross(temp, rho);
+	kappa_planck = kappa_ff_planck(temp, rho);
+	
+	pnrrad->sigma_s(k,j,i,0) = rho * (kappa_s / kappa_unit); //scatter
+	pnrrad->sigma_a(k,j,i,0) = rho * (kappa_ross / kappa_unit); //rosseland mean
+	pnrrad->sigma_pe(k,j,i,0) = rho * (kappa_planck / kappa_unit); //planck mean
+	pnrrad->sigma_p(k,j,i,0) = rho * (kappa_planck / kappa_unit);//planck mean
+      
+      }//end i
+    }//end j
+  }//end k
+
+}
+
+//planck mean free free absorption
+Real kappa_ff_planck(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 2.86e-5*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs;
+}
+
+//rosseland mean free free absorption
+Real kappa_ff_ross(Real temp, Real rho){
+  Real rho_cgs = rho*rho_unit;
+  Real temp_cgs =  temp*temp_unit;
+  Real kappa_cgs = 7.73e-7*(rho_cgs/1.0e-8)*pow(temp_cgs/1.0e6, -3.5);
+
+  return kappa_cgs;
+}
+
+void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
+
+  NRRadiation *pnrrad=pmb->pnrrad;
+  int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
+  //int kl=pmb->kl, ku=pmb->ku, js=pmb->jl, je=pmb->ju, is=pmb->il, ie=pmb->iu;
+  int il = is - NGHOST;
+  int iu = ie + NGHOST;
+  int jl=js, ju=je;
+  int kl=ks, ku=ke;
+  //ONE-DIMENSIONAL ONLY!
+  if (pmb->pmy_mesh->f2){
+    jl = js - NGHOST;
+    ju = je + NGHOST;
+  }
+  if (pmb->pmy_mesh->f3){
+    kl = ks - NGHOST;
+    ku = ke + NGHOST;
+  }
+
+  // electron scattering opacity
+  Real kappas = 0.2 * (1.0 + 0.6);
+  Real kappa_sct_ross = 0.0;
+  Real kappa_ross = 0.0;
+  Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
+  Real T_llim = 1.0e4;//lower lim of TOPs data, temperature at which switch Combined opacity grey opacity including dust
+  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
+  
+  for (int k=kl; k<=ku; k++){
+    for (int j=jl; j<=ju; j++){
+      for (int i=il; i<=iu; i++){
+	Real rho = prim(IDN,k,j,i);
+	Real temp = prim(IPR,k,j,i)/prim(IDN,k,j,i); //std::max(prim(IPR,k,j,i)/prim(IDN,k,j,i), tfloor);
+	Real rho_cgs = rho*rho_unit;
+	Real temp_cgs = temp*temp_unit;
+  
+	Real kappa_s, kappa_ross, kappa_planck;
+	combineopacity(rho_cgs, temp_cgs, kappa_sct_ross, kappa_planck);
+  
+	if(kappa_sct_ross < kappa_es){
+	  if(temp < T_ion/temp_unit){
+	    kappa_ross = kappa_sct_ross;
+	    kappa_s = 0.0;
+	  }else{
+	    kappa_ross = 0.0;
+	    kappa_s = kappa_sct_ross;
+	  }
+	}else{
+	  kappa_ross = kappa_sct_ross - kappa_es;
+	  kappa_s = kappa_es;
+	}
+
+	//one frequency
+	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
+	pnrrad->sigma_a(k,j,i,0) = kappa_ross * rho * rho_unit * l_unit; //rosseland mean
+	pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
+	pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
+      
+      }//end i
+    }//end j
+  }//end k
+
+}
+
+void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck){
+
+  //STEP1: find index of temperature and density range
+  //index searching segment in rho grid
+  int nrho1 = 0;
+  int nrho2 = 0;
+
+  while(( rho > combine_rho_grid(nrho2)) && (nrho2 < n_rho-1)){
+    nrho1 = nrho2;
+    nrho2++;
+  }
+  //if hits the end of table, set two index equal
+  if(nrho2==n_rho-1 && (rho > combine_rho_grid(nrho2))){
+    nrho1=nrho2;
+  }
+
+
+  //index searching segments in temperature grid
+  int nt1 = 0;
+  int nt2 = 0;
+  while((tgas > combine_temp_grid(nt2)) && (nt2 < n_tem-1)){
+    nt1 = nt2;
+    nt2++;
+  }
+  //if hits the end of table, set two index equal
+  if(nt2==n_tem-1 && (tgas > combine_temp_grid(nt2))){
+    nt1=nt2;
+  }
+
+  //STEP2: read the templated opacities, get ready for interpolation
+  
+  Real kappa_t1_rho1_gray=combine_ross_table(nt1,nrho1);
+  Real kappa_t1_rho2_gray=combine_ross_table(nt1,nrho2);
+  Real kappa_t2_rho1_gray=combine_ross_table(nt2,nrho1);
+  Real kappa_t2_rho2_gray=combine_ross_table(nt2,nrho2);
+
+  Real planck_t1_rho1_gray=combine_planck_table(nt1,nrho1);
+  Real planck_t1_rho2_gray=combine_planck_table(nt1,nrho2);
+  Real planck_t2_rho1_gray=combine_planck_table(nt2,nrho1);
+  Real planck_t2_rho2_gray=combine_planck_table(nt2,nrho2);
+
+  //in the case the temperature is out of range, extrapolate planck mean opacity by T^-3.5
+  Real logt = log10(tgas);
+  Real logtlim_table = log10(combine_temp_grid(n_tem-1));
+  if(nt2 == n_tem-1 && (logt > logtlim_table)){
+    Real scaling = pow(10.0, -3.5*(logt - logtlim_table));
+    planck_t1_rho1_gray *= scaling;
+    planck_t1_rho2_gray *= scaling;
+    planck_t2_rho1_gray *= scaling;
+    planck_t2_rho2_gray *= scaling;
+  }
+
+  //Note that if density is below the tabulated value, will use the lowest temperature in table
+
+  Real rho_1 = combine_rho_grid(nrho1);
+  Real rho_2 = combine_rho_grid(nrho2);
+
+  Real t_1 = combine_temp_grid(nt1);
+  Real t_2 = combine_temp_grid(nt2);
+
+  //printf("rho1:%g, rho2:%g, t1:%g, t2:%g\n", rho_1, rho_2, t_1, t_2);
+
+  //SPEP 3: Rossland opacity interpolation
+  if (nrho1 == nrho2){ //if density both on lower or upper end of table 
+    if (nt1 == nt2){ //if temperature also on lower or upper end of table
+      kappa_ross = kappa_t1_rho1_gray; //use the only value, don't interpolate
+    }else{ //interpolate only on temperature
+      kappa_ross = kappa_t1_rho1_gray + (kappa_t2_rho1_gray - kappa_t1_rho1_gray) 
+            * (tgas - t_1)/(t_2 - t_1);
+    }
+  }else{ //if two densitites are different
+    if(nt1 == nt2){ //if temperature index are the same, only interpolate density
+      kappa_ross = kappa_t1_rho1_gray + (kappa_t1_rho2_gray - kappa_t1_rho1_gray) 
+                                * (rho - rho_1)/(rho_2 - rho_1);
+    }else{ //interpolate both density and temperature
+
+      kappa_ross = kappa_t1_rho1_gray * (t_2 - tgas) * (rho_2 - rho)  
+                           /((t_2 - t_1) * (rho_2 - rho_1))
+           + kappa_t2_rho1_gray * (tgas - t_1) * (rho_2 - rho)
+                                /((t_2 - t_1) * (rho_2 - rho_1))
+           + kappa_t1_rho2_gray * (t_2 - tgas) * (rho - rho_1)
+                                /((t_2 - t_1) * (rho_2 - rho_1))
+           + kappa_t2_rho2_gray * (tgas - t_1) * (rho - rho_1)
+                     /((t_2 - t_1) * (rho_2 - rho_1));
+    }
+  }
+
+  //STEP4: Planck opacity interpolation
+    if (nrho1 == nrho2){ //if density both on lower or upper end of table 
+      if (nt1 == nt2){ //if temperature also on lower or upper end of table
+        kappa_planck = planck_t1_rho1_gray;
+      }else{ //interpolate only on temperature
+        kappa_planck = planck_t1_rho1_gray + (planck_t2_rho1_gray - planck_t1_rho1_gray)
+               *(tgas - t_1)/(t_2 - t_1);
+      }
+    }else{//if two densitites are different
+      if (nt1 == nt2){
+        kappa_planck = planck_t1_rho1_gray + (planck_t1_rho2_gray - planck_t1_rho1_gray)
+               *(rho - rho_1)/(rho_2 - rho_1);
+      }else{ //interpolate both density and temperature
+        kappa_planck = planck_t1_rho1_gray * (t_2 - tgas) * (rho_2 - rho)
+                                /((t_2 - t_1) * (rho_2 - rho_1))
+              + planck_t2_rho1_gray * (tgas - t_1) * (rho_2 - rho)
+                                /((t_2 - t_1) * (rho_2 - rho_1))
+              + planck_t1_rho2_gray * (t_2 - tgas) * (rho - rho_1)
+                                /((t_2 - t_1) * (rho_2 - rho_1))
+              + planck_t2_rho2_gray * (tgas - t_1) * (rho - rho_1)
+                                /((t_2 - t_1) * (rho_2 - rho_1));
+      }
+    }
+}
+
+/* end utility functions */
