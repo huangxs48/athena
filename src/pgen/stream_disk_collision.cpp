@@ -3,7 +3,7 @@
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 
 // A stream colliding with a section of accretion disk
-// --prob stream_disk_collision
+// --prob stream_disk_collision --nr_radiation --flux=hlle --nscalar=1 
 
 //========================================================================================
 // C header
@@ -46,8 +46,11 @@ static Real dfloor, pfloor, d_amb, p_amb;
 static int bh_grav_flag;
 static Real GM_bh;
 static Real x_bh, y_bh, z_bh; //BH location
+static Real r_excise; //region to excise
 
 static int uniform_stream;
+static int inj_inner_x1;
+static int inj_outer_x2;
 static Real r_inj_thresh;
 static Real vx_inj, vy_inj, vz_inj;
 static Real rho_inj, temp_inj, h_inj, x_inj, y_inj, z_inj;
@@ -75,6 +78,11 @@ static int n_tem;
 static int n_rho;
 Real kappa_es;
 
+//AMR related
+Real max_dens_eps_thresh, min_dens_eps_thresh;
+Real max_dens_thresh, min_dens_thresh;
+Real max_dis_to_inj_thresh, min_dis_to_bh_thresh;
+
 //frequency integrated free free opacity
 Real kappa_ff_planck(Real temp, Real rho);
 Real kappa_ff_ross(Real temp, Real rho);
@@ -99,6 +107,12 @@ void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
         	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
 
+void StreamInjectInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+			 Real time, Real dt,
+			 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
+	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+        	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
 
 Real RadTimeStep(MeshBlock *pmb){
   // //leave the option to force radiation timestep
@@ -114,6 +128,8 @@ Real RadTimeStep(MeshBlock *pmb){
     return pmb->pmy_mesh->dt;
   }
 }
+
+int RefinementCondition(MeshBlock *pmb);
 
 //========================================================================================
 //! \fn void Mesh::InitUserMeshData(ParameterInput *pin)
@@ -143,9 +159,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   bh_grav_flag = pin->GetOrAddInteger("problem", "bh_grav_flag", 0);
   GM_bh = pin->GetOrAddReal("problem", "GM_bh", 1.0);
-  x_bh = pin->GetOrAddReal("problem", "x_bh", 100.0);
-  y_bh = pin->GetOrAddReal("problem", "y_bh", 100.0);
-  z_bh = pin->GetOrAddReal("problem", "z_bh", 100.0);
+  x_bh = pin->GetOrAddReal("problem", "x_bh", 0.0);
+  y_bh = pin->GetOrAddReal("problem", "y_bh", 0.0);
+  z_bh = pin->GetOrAddReal("problem", "z_bh", 0.0);
+  r_excise = pin->GetOrAddReal("problem", "r_excise", 100.0);
 
   include_disk = pin->GetOrAddInteger("problem", "include_disk", 0);
   h_disk = pin->GetOrAddReal("problem", "h_disk", 1.0);
@@ -157,6 +174,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   disk_scalar_frac = pin->GetOrAddReal("problem", "grav_disk", 4.0); //number of scale heigh to paint disk scalar
 
   uniform_stream = pin->GetOrAddReal("problem", "uniform_stream", 0.0);
+  inj_inner_x1 = pin->GetOrAddInteger("problem", "inj_inner_x1", 0);
+  inj_outer_x2 = pin->GetOrAddInteger("problem", "inj_outer_x2", 1);
   r_inj_thresh = pin->GetOrAddReal("problem", "r_inj_thresh", 0.0);
   h_inj = pin->GetOrAddReal("problem", "h_inj", 1.0);
   x_inj = pin->GetOrAddReal("problem", "x_inj", 0.0);
@@ -177,26 +196,49 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   opacity_type = pin->GetOrAddString("problem", "opacity_type", "freefree");
   n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
   n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
+
+  //AMR thresholds
+  max_dens_eps_thresh = pin->GetOrAddReal("problem", "max_dens_eps_thresh", 1.0e8);
+  min_dens_eps_thresh = pin->GetOrAddReal("problem", "min_dens_eps_thresh", 1.0e-8);
+  max_dens_thresh = pin->GetOrAddReal("problem", "max_dens_thresh", 1.0e8);
+  min_dens_thresh = pin->GetOrAddReal("problem", "min_dens_thresh", 1.0e-8);
+  max_dis_to_inj_thresh = pin->GetOrAddReal("problem", "max_dis_to_inj_thresh", 1.0e2);
+  min_dis_to_bh_thresh = pin->GetOrAddReal("problem", "min_dis_to_bh_thresh", 1.0e2);
   
   EnrollUserExplicitSourceFunction(Phi_BH_DiskGrav);
 
   EnrollUserTimeStepFunction(RadTimeStep);
-  //if (adaptive==true)
-  //  EnrollUserRefinementCondition(RefinementCondition);
+  if (adaptive==true)
+   EnrollUserRefinementCondition(RefinementCondition);
 
 
   // enroll user-defined boundary condition
   if (mesh_bcs[BoundaryFace::outer_x2] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::outer_x2, StreamInjectOuterX2);
+    if (inj_outer_x2==1 && inj_inner_x1==0)
+      EnrollUserBoundaryFunction(BoundaryFace::outer_x2, StreamInjectOuterX2);
   }
 
   if (NR_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::outer_x2] == GetBoundaryFlag("user")) {
-      EnrollUserRadBoundaryFunction(BoundaryFace::outer_x2, RadOuterX2);
+      if (inj_outer_x2==1 && inj_inner_x1==0)
+	EnrollUserRadBoundaryFunction(BoundaryFace::outer_x2, RadOuterX2);
     }
   }
 
+  if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
+    if (inj_outer_x2==0 && inj_inner_x1==1)
+      EnrollUserBoundaryFunction(BoundaryFace::inner_x1, StreamInjectInnerX1);
+  }
+
+  if (NR_RADIATION_ENABLED){
+    //Enroll rad boundaries
+    if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
+      if (inj_outer_x2==0 && inj_inner_x1==1)
+	EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
+    }
+  }
+  
   //load talbe 
   if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
     //nfre = pin->GetOrAddInteger("radiation", "n_frequency", 1);
@@ -263,28 +305,57 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   return;
 }
 
-int RefinementCondition(MeshBlock *pmb){ //not used yet, not sure if it works with self-gravity
+int RefinementCondition(MeshBlock *pmb){ 
 
   AthenaArray<Real> &w = pmb->phydro->w;
-  Real max_d2 = 0.0;//maximum length to m2 in a meshblock
-  for(int k=pmb->ks; k<=pmb->ke; k++) {
-    for(int j=pmb->js; j<=pmb->je; j++) {
-      for(int i=pmb->is; i<=pmb->ie; i++) {
+  Real maxeps = 0.0;
+  Real max_dens = 0.0;
+  Real max_dis_to_inj = 0.0;
+  Real min_dis_to_bh = 1.0e8;
+  
+  //int current_level = pmb->pmy_mesh->get_current_level();//pmb->loc.level - pmb->pmy_mesh->root_level;
 
-	//current coordinate
+  for (int k=pmb->ks; k<=pmb->ke; k++) {
+    for (int j=pmb->js; j<=pmb->je; j++) {
+      for (int i=pmb->is; i<=pmb->ie; i++) {
+	
+	Real epsr = (std::abs(w(IDN,k,j,i+1) - 2.0*w(IDN,k,j,i) + w(IDN,k,j,i-1))
+		     + std::abs(w(IDN,k,j+1,i) - 2.0*w(IDN,k,j,i) + w(IDN,k,j-1,i))
+		     + std::abs(w(IDN,k+1,j,i) - 2.0*w(IDN,k,j,i) + w(IDN,k-1,j,i)));///w(IDN,k,j,i);
+	
+	// Real epsp = (std::abs(w(IPR,k,j,i+1) - 2.0*w(IPR,k,j,i) + w(IPR,k,j,i-1))
+	//             + std::abs(w(IPR,k,j+1,i) - 2.0*w(IPR,k,j,i) + w(IPR,k,j-1,i)))
+	//             /w(IPR,k,j,i);
+	// Real eps = std::max(epsr, epsp);
+	
 	Real x_now = pmb->pcoord->x1v(i);
 	Real y_now = pmb->pcoord->x2v(j);
 	Real z_now = pmb->pcoord->x3v(k);
+	
+	Real dis_to_inj = sqrt((x_now - x_inj) * (x_now - x_inj)
+			       + (y_now - y_inj) * (y_now - y_inj)
+			       + (z_now - z_inj) * (z_now - z_inj));
 
-	Real r_now = sqrt(pow(x_now, 2) + pow(y_now, 2) + pow(z_now, 2));
+	Real dis_to_bh  = sqrt((x_now - x_bh) * (x_now - x_bh)
+			       + (y_now - y_bh) * (y_now - y_bh)
+			       + (z_now - z_bh) * (z_now - z_bh));
+	
+	maxeps = std::max(maxeps, epsr);
+	max_dens = std::max(max_dens, w(IDN,k,j,i));
+	max_dis_to_inj = std::max(max_dis_to_inj, dis_to_inj);
+	min_dis_to_bh = std::min(min_dis_to_bh, dis_to_bh);
+	
+      }//i
+    }//j
+  }//k
 
-	max_d2 = std::max(max_d2, r_now);
-      }
-    }
-  }
-  //printf("max_d2:%g\n", max_d2);
-  if(max_d2 < 0.8) return 1;
-  if(max_d2 > 0.8) return -1;
+  //printf("%g %g %g %g\n", max_dis_to_inj, min_dis_to_bh, maxeps, max_dens);
+
+  if (max_dis_to_inj < max_dis_to_inj_thresh) return 1;
+  if (min_dis_to_bh < min_dis_to_bh_thresh) return 1;
+  if (maxeps > max_dens_eps_thresh && max_dens > max_dens_thresh) return 1;
+  if (maxeps < min_dens_eps_thresh || max_dens < min_dens_thresh) return -1;
+  
   return 0;
 }
 
@@ -302,12 +373,12 @@ void Mesh::UserWorkInLoop(){
     for(int k=pmb->ks; k<=pmb->ke; k++){
       for(int i=pmb->is; i<=pmb->ie; i++){
     	for(int j=pmb->js; j<=pmb->je; j++){
-	  Real ycoord = pcoord->x2v(j);
+	  
 	  Real rho = phydro->u(IDN,k,j,i);
 	  Real press = phydro->w(IPR,k,j,i);
 	  Real temp = phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
 
-	  // // ////debug
+	  // debug
 	  for (int n=0; n<(NHYDRO); n++){
 	    if (std::isnan(phydro->u(n,k,j,i))){
 	      printf("x1v:%g, x2v:%g, n:%d eint:%g, rho:%g, gid:%d, k:%d, j:%d, i:%d\n", pcoord->x1v(i), pcoord->x2v(j), n, phydro->u(IEN,k,j,i), phydro->u(IDN,k,j,i), pmb->gid, k, j, i);
@@ -315,9 +386,7 @@ void Mesh::UserWorkInLoop(){
 	      }
 	  }
 
-	  //inject energy
-	  
-
+	  // limit velocity
 	  Real vel1 = pmb->phydro->w(IVX,k,j,i);
 	  Real vel2 = pmb->phydro->w(IVY,k,j,i);
 	  Real vel3 = pmb->phydro->w(IVZ,k,j,i);
@@ -331,6 +400,32 @@ void Mesh::UserWorkInLoop(){
 	    pmb->phydro->w(IVZ,k,j,i) = vel3 = (vel3 >=0) ? std::min(vel3, 0.99*c_light) : std::max(vel3, -0.99*c_light);
 	  }
 
+	  //excise BH ISCO
+	  Real x = pmb->pcoord->x1v(i);
+	  Real y = pmb->pcoord->x2v(j);
+	  Real z = pmb->pcoord->x3v(k);
+
+	  Real r = sqrt((x - x_bh) * (x - x_bh)
+			+ (y - y_bh) * (y - y_bh)
+			+ (z - z_bh) * (z - z_bh));
+
+	  if (r < r_excise){
+	    
+	    pmb->phydro->w(IDN,k,j,i) = dfloor;
+	    pmb->phydro->w(IVX,k,j,i) = 0.0;
+	    pmb->phydro->w(IVY,k,j,i) = 0.0;
+	    pmb->phydro->w(IVZ,k,j,i) = 0.0;
+	    pmb->phydro->w(IPR,k,j,i) = pfloor;
+
+	    if (NR_RADIATION_ENABLED){
+	      for (int ifr=0; ifr<pmb->pnrrad->nfreq; ++ifr){
+		for(int n=0; n<pmb->pnrrad->nang; ++n){
+		  int ang=ifr * pmb->pnrrad->nang+n;
+		  pmb->pnrrad->ir(k,j,i,ang) = 1.0e-20;
+		}
+	      }
+	    }//end rad
+	  }//r_excise
 
 
 	}//j
@@ -566,8 +661,8 @@ void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	}else{
 	  prim(IDN,k,ju+j,i) = prim(IDN,k,ju,i);
 	  prim(IVX,k,ju+j,i) = prim(IVX,k,ju,i);
-	  prim(IVZ,k,ju+j,i) = std::max(0.0, prim(IVZ,k,ju,i));
-	  prim(IVY,k,ju+j,i) = prim(IVY,k,ju,i);
+	  prim(IVY,k,ju+j,i) = std::max(0.0, prim(IVY,k,ju,i));
+	  prim(IVZ,k,ju+j,i) = prim(IVZ,k,ju,i);
 	  if (NON_BAROTROPIC_EOS){
 	    prim(IPR,k,ju+j,i) = prim(IPR,k,ju,i); 
 	  }
@@ -579,7 +674,6 @@ void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
   }//k
 
 }
-
 
 void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
@@ -607,6 +701,83 @@ void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 
 }
 
+void StreamInjectInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+			 Real time, Real dt,
+			 int il, int iu, int jl, int ju, int kl, int ku, int ngh){
+
+  for (int k=kl; k<=ku; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=1; i<=NGHOST; ++i) {
+	
+	//get currtent Cartesian coordinates
+	Real x_now = pco->x1v(il-i);
+	Real y_now = pco->x2v(j);
+	Real z_now = pco->x3v(k);
+
+	//distance to injection point
+	Real dis_to_inj = sqrt((x_now - x_inj)*(x_now - x_inj)
+			       + (y_now - y_inj)*(y_now - y_inj)
+			       + (z_now - z_inj)*(z_now - z_inj)
+			       );
+	
+	if (dis_to_inj < r_inj_thresh){
+	  //printf("xnow:%g, ynow:%g, znow:%g, dis_to_inj:%g, r_inj_thresh:%g\n", x_now, y_now, z_now,  dis_to_inj, r_inj_thresh);
+	  Real local_dens = rho_inj * rho_norm;
+
+	  //stream density, if not uniform
+	  if (uniform_stream==0){
+	    local_dens = local_dens * std::exp( -std::pow(dis_to_inj/h_inj, 2)/2.0 );
+	  }
+
+	  prim(IDN,k,j,il-i) = local_dens;
+	  prim(IVX,k,j,il-i) = vx_inj;
+	  prim(IVY,k,j,il-i) = vy_inj;
+	  prim(IVZ,k,j,il-i) = vz_inj;
+  
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,k,j,il-i) = local_dens * temp_inj;
+	  }
+	}else{
+	  prim(IDN,k,j,il-i) = prim(IDN,k,j,il);
+	  prim(IVX,k,j,il-i) = std::min(0.0, prim(IVX,k,j,il));
+	  prim(IVY,k,j,il-i) = prim(IVY,k,j,il);
+	  prim(IVZ,k,j,il-i) = prim(IVZ,k,j,il);
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,k,j,il-i) = prim(IPR,k,j,il); 
+	  }
+	  
+	}//r_inj_thresh
+	
+      }//i
+    }//j
+  }//k
+
+}
+
+
+void RadInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
+	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+        	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  int &nang = prad->nang; // angles per octant
+  int &nfreq = prad->nfreq; // number of frequency bands
+
+  for (int k=ks; k<=ke; ++k) {
+  for (int j=js; j<=je; ++j) {
+  for (int i=1; i<=ngh; ++i) {
+  for (int ifr=0; ifr<nfreq; ++ifr){
+    for(int n=0; n<nang; ++n){
+      int ang=ifr*nang+n;
+      //simple copy
+      ir(k,j,is-i,ang) = ir(k,j,is,ang);
+
+    }// end n
+  }// end ifr
+  }}}
+
+  return;
+
+}
 
 /* utility functions */
 void ReadOpacityTable(){
