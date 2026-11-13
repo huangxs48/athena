@@ -103,7 +103,13 @@ void Phi_BH_DiskGrav(MeshBlock *pmb, const Real time, const Real dt, const Athen
 void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
 			 Real time, Real dt,
 			 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void StreamInjectOuterX3(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+			 Real time, Real dt,
+			 int il, int iu, int jl, int ju, int kl, int ku, int ngh);
 void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
+	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+        	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
+void RadOuterX3(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
         	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh);
 
@@ -175,7 +181,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   uniform_stream = pin->GetOrAddReal("problem", "uniform_stream", 0.0);
   inj_inner_x1 = pin->GetOrAddInteger("problem", "inj_inner_x1", 0);
-  inj_outer_x2 = pin->GetOrAddInteger("problem", "inj_outer_x2", 1);
+  inj_outer_x2 = pin->GetOrAddInteger("problem", "inj_outer_x2", 0);
   r_inj_thresh = pin->GetOrAddReal("problem", "r_inj_thresh", 0.0);
   h_inj = pin->GetOrAddReal("problem", "h_inj", 1.0);
   x_inj = pin->GetOrAddReal("problem", "x_inj", 0.0);
@@ -217,12 +223,20 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     if (inj_outer_x2==1 && inj_inner_x1==0)
       EnrollUserBoundaryFunction(BoundaryFace::outer_x2, StreamInjectOuterX2);
   }
+  if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
+    if (inj_outer_x2==0 && inj_inner_x1==0)
+      EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StreamInjectOuterX3);
+  }
 
   if (NR_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::outer_x2] == GetBoundaryFlag("user")) {
       if (inj_outer_x2==1 && inj_inner_x1==0)
 	EnrollUserRadBoundaryFunction(BoundaryFace::outer_x2, RadOuterX2);
+    }
+    if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
+      if (inj_outer_x2==0 && inj_inner_x1==0)
+	EnrollUserRadBoundaryFunction(BoundaryFace::outer_x3, RadOuterX3);
     }
   }
 
@@ -675,6 +689,60 @@ void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 
 }
 
+void StreamInjectOuterX3(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
+			 Real time, Real dt,
+			 int il, int iu, int jl, int ju, int kl, int ku, int ngh){
+
+  for (int k=1; k<=NGHOST; ++k) {
+    for (int j=jl; j<=ju; ++j) {
+      for (int i=il; i<=iu; ++i) {
+	
+	//get currtent Cartesian coordinates
+	Real x_now = pco->x1v(i);
+	Real y_now = pco->x2v(j);
+	Real z_now = pco->x3v(ku+k);
+
+	//distance to injection point
+	Real dis_to_inj = sqrt((x_now - x_inj)*(x_now - x_inj)
+			       + (y_now - y_inj)*(y_now - y_inj)
+			       + (z_now - z_inj)*(z_now - z_inj)
+			       );
+	if (dis_to_inj < r_inj_thresh){
+	  //printf("xnow:%g, ynow:%g, znow:%g, dis_to_inj:%g, r_inj_thresh:%g\n", x_now, y_now, z_now,  dis_to_inj, r_inj_thresh);
+	  Real local_dens = rho_inj * rho_norm;
+
+	  //stream density, if not uniform
+	  if (uniform_stream==0){
+	    local_dens = local_dens * std::exp( -std::pow(dis_to_inj/h_inj, 2)/2.0 );
+	  }
+
+	  prim(IDN,ku+k,j,i) = local_dens;
+	  prim(IVX,ku+k,j,i) = vx_inj;
+	  prim(IVY,ku+k,j,i) = vy_inj;
+	  prim(IVZ,ku+k,j,i) = vz_inj;
+
+	  //printf("local_dens:%g, vx_inj:%g, vy_inj:%g, vz_inj:%g\n", local_dens, vx_inj, vy_inj, vz_inj);
+	  
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,ku+k,j,i) = local_dens * temp_inj;
+	  }
+	}else{
+	  prim(IDN,ku+k,j,i) = prim(IDN,ku,j,i);
+	  prim(IVX,ku+k,j,i) = prim(IVX,ku,j,i);
+	  prim(IVY,ku+k,j,i) = prim(IVZ,ku,j,i);
+	  prim(IVZ,ku+k,j,i) = std::max(0.0, prim(IVY,ku,j,i));
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,ku+k,j,i) = prim(IPR,ku,j,i); 
+	  }
+	  
+	}//r_inj_thresh
+	
+      }//i
+    }//j
+  }//k
+
+}
+
 void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
 	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
         	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
@@ -692,6 +760,32 @@ void RadOuterX2(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
       //Real mu_dir = prad->mu(1,k,je+j,i,n);
       
       ir(k,je+j,i,ang) = ir(k,je,i,ang);
+
+    }// end n
+  }// end ifr
+  }}}
+
+  return;
+
+}
+
+void RadOuterX3(MeshBlock *pmb, Coordinates *pco, NRRadiation *prad,
+	        const AthenaArray<Real> &w, FaceField &b, AthenaArray<Real> &ir,
+        	Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
+
+  int &nang = prad->nang; // angles per octant
+  int &nfreq = prad->nfreq; // number of frequency bands
+
+  for (int k=1; k<=ngh; ++k) {
+  for (int j=js; j<=je; ++j) {
+  for (int i=is; i<=ie; ++i) {
+  for (int ifr=0; ifr<nfreq; ++ifr){
+    for(int n=0; n<nang; ++n){
+      int ang=ifr*nang+n;
+      //if directs outwards: mu_dir>0, inward: mu_dir<0
+      //Real mu_dir = prad->mu(1,k,je+j,i,n);
+      
+      ir(ke+k,j,i,ang) = ir(ke,j,i,ang);
 
     }// end n
   }// end ifr
