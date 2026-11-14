@@ -43,6 +43,7 @@ SRC_FILES := $(wildcard src/*.cpp) \
 	     src/coordinates/$(COORDINATES_FILE) \
 	     src/eos/general/$(GENERAL_EOS_FILE) \
 	     src/eos/$(EOS_FILE) \
+	     src/eos/eos.cpp \
 	     src/eos/eos_high_order.cpp \
 	     src/eos/eos_scalars.cpp \
 	     $(wildcard $(CHEMISTRY_FILE)) \
@@ -65,6 +66,7 @@ SRC_FILES := $(wildcard src/*.cpp) \
              $(wildcard src/cr/integrators/*.cpp) \
              $(wildcard src/crdiffusion/*.cpp) \
 	     src/hydro/rsolvers/$(RSOLVER_DIR)$(RSOLVER_FILE) \
+	     src/hydro/rsolvers/$(RSOLVER_DIR)llf_single_state.cpp \
 	     $(wildcard src/inputs/*.cpp) \
 	     $(wildcard src/mesh/*.cpp) \
 	     $(wildcard src/multigrid/*.cpp) \

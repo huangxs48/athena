@@ -304,3 +304,37 @@ void FieldDiffusion::NewDiffusionDt(Real &dt_oa, Real &dt_h) {
   }
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void FieldDiffusion::AddPoyntingFluxSingleCell
+//! \brief Add Poynting flux to the hydro energy flux on the 6 faces of one cell
+
+void FieldDiffusion::AddPoyntingFluxSingleCell(FaceField &p_src, int i, int j, int k) {
+  MeshBlock *pmb = pmy_block;
+  AthenaArray<Real> &x1flux = pmb->phydro->flux[X1DIR];
+  AthenaArray<Real> &x2flux = pmb->phydro->flux[X2DIR];
+  AthenaArray<Real> &x3flux = pmb->phydro->flux[X3DIR];
+  int js = pmb->js; int ks = pmb->ks;
+
+  AthenaArray<Real> &f1 = p_src.x1f, &f2 = p_src.x2f, &f3 = p_src.x3f;
+
+  if (pmb->block_size.nx2 == 1) {
+    x1flux(IEN,ks,js,i)   += f1(ks,js,i);
+    x1flux(IEN,ks,js,i+1) += f1(ks,js,i+1);
+    return;
+  }
+  if (pmb->block_size.nx3 == 1) {
+    x1flux(IEN,ks,j,i)   += f1(ks,j,i);
+    x1flux(IEN,ks,j,i+1) += f1(ks,j,i+1);
+    x2flux(IEN,ks,j,i)   += f2(ks,j,i);
+    x2flux(IEN,ks,j+1,i) += f2(ks,j+1,i);
+    return;
+  }
+  x1flux(IEN,k,j,i)   += f1(k,j,i);
+  x1flux(IEN,k,j,i+1) += f1(k,j,i+1);
+  x2flux(IEN,k,j,i)   += f2(k,j,i);
+  x2flux(IEN,k,j+1,i) += f2(k,j+1,i);
+  x3flux(IEN,k,j,i)   += f3(k,j,i);
+  x3flux(IEN,k+1,j,i) += f3(k+1,j,i);
+  return;
+}

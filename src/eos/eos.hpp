@@ -46,6 +46,18 @@ class EquationOfState {
       AthenaArray<Real> &prim, AthenaArray<Real> &bcc,
       Coordinates *pco, int il, int iu, int jl, int ju, int kl, int ku);
 
+  // FOFC test: flag cells whose ConsToPrim would have used the density/pressure floor
+  void ConservedToPrimitiveTest(const AthenaArray<Real> &cons,
+      const AthenaArray<Real> &bcc, int il, int iu, int jl, int ju, int kl, int ku);
+  void SingleConservativeToPrimitiveHydro(
+      Real &u_d, Real &u_m1, Real &u_m2, Real &u_m3, Real &u_e,
+      Real &w_d, Real &w_vx, Real &w_vy, Real &w_vz, Real &w_p,
+      Real &dp, bool &dfloor_used, bool &pfloor_used);
+  void SingleConservativeToPrimitiveMHD(
+      Real &u_d, Real &u_m1, Real &u_m2, Real &u_m3, Real &u_e,
+      Real &w_d, Real &w_vx, Real &w_vy, Real &w_vz, Real &w_p,
+      Real &dp, bool &dfloor_used, bool &pfloor_used, const Real e_mag);
+
   // void PrimitiveToConservedCellAverage(const AthenaArray<Real> &prim,
   //   const AthenaArray<Real> &bc, AthenaArray<Real> &cons, Coordinates *pco, int il,
   //   int iu, int jl, int ju, int kl, int ku);
@@ -177,6 +189,7 @@ class EquationOfState {
   AthenaArray<Real> normal_mm_;          // normal-frame momenta, used in relativity
   AthenaArray<Real> normal_bb_;          // normal-frame fields, used in relativistic MHD
   AthenaArray<Real> normal_tt_;          // normal-frame M.B, used in relativistic MHD
+  AthenaArray<bool> fofc_;               // per-cell flag for first-order flux correction
   void InitEosConstants(ParameterInput *pin);
 };
 

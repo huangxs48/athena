@@ -302,3 +302,59 @@ void HydroDiffusion::NewDiffusionDt(Real &dt_vis, Real &dt_cnd) {
   }
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void HydroDiffusion::AddDiffusionEnergyFluxSingleCell
+//! \brief Adds only the conduction energy flux to hydro flux on the 6 faces of one cell
+
+void HydroDiffusion::AddDiffusionEnergyFluxSingleCell(AthenaArray<Real> *flux_src,
+                                                     AthenaArray<Real> *flux_des,
+                                                     int i, int j, int k) {
+  AthenaArray<Real> &x1flux = flux_des[X1DIR];
+  AthenaArray<Real> &x2flux = flux_des[X2DIR];
+  AthenaArray<Real> &x3flux = flux_des[X3DIR];
+  AthenaArray<Real> &x1diflx = flux_src[X1DIR];
+  AthenaArray<Real> &x2diflx = flux_src[X2DIR];
+  AthenaArray<Real> &x3diflx = flux_src[X3DIR];
+
+  x1flux(IEN,k,j,i)   += x1diflx(k,j,i  );
+  x1flux(IEN,k,j,i+1) += x1diflx(k,j,i+1);
+  if (pmb_->block_size.nx2 > 1) {
+    x2flux(IEN,k,j,i)   += x2diflx(k,j  ,i);
+    x2flux(IEN,k,j+1,i) += x2diflx(k,j+1,i);
+  }
+  if (pmb_->block_size.nx3 > 1) {
+    x3flux(IEN,k,j,i)   += x3diflx(k  ,j,i);
+    x3flux(IEN,k+1,j,i) += x3diflx(k+1,j,i);
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void HydroDiffusion::AddDiffusionFluxSingleCell
+//! \brief Adds all components of the viscous flux to hydro flux on the 6 faces of one cell
+
+void HydroDiffusion::AddDiffusionFluxSingleCell(AthenaArray<Real> *flux_src,
+                                                AthenaArray<Real> *flux_des,
+                                                int i, int j, int k) {
+  AthenaArray<Real> &x1flux = flux_des[X1DIR];
+  AthenaArray<Real> &x2flux = flux_des[X2DIR];
+  AthenaArray<Real> &x3flux = flux_des[X3DIR];
+  AthenaArray<Real> &x1diflx = flux_src[X1DIR];
+  AthenaArray<Real> &x2diflx = flux_src[X2DIR];
+  AthenaArray<Real> &x3diflx = flux_src[X3DIR];
+
+  for (int n=0; n<NHYDRO; ++n) {
+    x1flux(n,k,j,i)   += x1diflx(n,k,j,i  );
+    x1flux(n,k,j,i+1) += x1diflx(n,k,j,i+1);
+    if (pmb_->block_size.nx2 > 1) {
+      x2flux(n,k,j,i)   += x2diflx(n,k,j  ,i);
+      x2flux(n,k,j+1,i) += x2diflx(n,k,j+1,i);
+    }
+    if (pmb_->block_size.nx3 > 1) {
+      x3flux(n,k,j,i)   += x3diflx(n,k  ,j,i);
+      x3flux(n,k+1,j,i) += x3diflx(n,k+1,j,i);
+    }
+  }
+  return;
+}

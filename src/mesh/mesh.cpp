@@ -92,6 +92,7 @@ Mesh::Mesh(ParameterInput *pin, int mesh_test) :
              ? true : false),
     multilevel((adaptive || pin->GetOrAddString("mesh", "refinement", "none") == "static")
                ? true : false),
+    fofc_enabled(pin->GetOrAddBoolean("hydro", "fofc", false)),
     orbital_advection(pin->GetOrAddInteger("orbital_advection","OAorder",0)),
     shear_periodic(GetBoundaryFlag(pin->GetOrAddString("mesh", "ix1_bc", "none"))
                    == BoundaryFlag::shear_periodic ? true : false),
@@ -642,6 +643,7 @@ Mesh::Mesh(ParameterInput *pin, IOWrapper& resfile, int mesh_test) :
              ? true : false),
     multilevel((adaptive || pin->GetOrAddString("mesh", "refinement", "none") == "static")
                ? true : false),
+    fofc_enabled(pin->GetOrAddBoolean("hydro", "fofc", false)),
     orbital_advection(pin->GetOrAddInteger("orbital_advection","OAorder",0)),
     shear_periodic(GetBoundaryFlag(pin->GetOrAddString("mesh", "ix1_bc", "none"))
                    == BoundaryFlag::shear_periodic ? true : false),

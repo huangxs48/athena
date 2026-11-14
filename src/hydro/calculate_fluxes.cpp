@@ -439,3 +439,24 @@ void Hydro::AddDiffusionFluxes() {
   }
   return;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void Hydro::AddDiffusionFluxesSingleCell
+//! \brief Adds diffusion fluxes only on the six faces of one cell (used by FOFC).
+
+void Hydro::AddDiffusionFluxesSingleCell(int i, int j, int k) {
+  Field *pf = pmy_block->pfield;
+  if (hdif.hydro_diffusion_defined) {
+    if (hdif.nu_iso > 0.0 || hdif.nu_aniso > 0.0)
+      hdif.AddDiffusionFluxSingleCell(hdif.visflx,flux,i,j,k);
+    if (NON_BAROTROPIC_EOS) {
+      if (hdif.kappa_iso > 0.0 || hdif.kappa_aniso > 0.0)
+        hdif.AddDiffusionEnergyFluxSingleCell(hdif.cndflx,flux,i,j,k);
+    }
+  }
+  if (MAGNETIC_FIELDS_ENABLED && NON_BAROTROPIC_EOS) {
+    if (pf->fdif.field_diffusion_defined)
+      pf->fdif.AddPoyntingFluxSingleCell(pf->fdif.pflux,i,j,k);
+  }
+  return;
+}
