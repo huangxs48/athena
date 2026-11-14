@@ -71,14 +71,20 @@ static int n_rho;
 static AthenaArray<Real> fre_grid;
 static AthenaArray<Real> fre_temp_grid;
 static AthenaArray<Real> fre_rho_grid;
-static AthenaArray<Real> fre_ross_table;
-static AthenaArray<Real> fre_planck_table;
+static AthenaArray<Real> fre_ross_table;   // stored as log10(kappa) after load
+static AthenaArray<Real> fre_planck_table; // stored as log10(kappa) after load
 static AthenaArray<Real> full_ross_table;
 static AthenaArray<Real> full_planck_table;
 static AthenaArray<Real> elec_frac_table;
 static int nfre ; // /total number of frequency groups
 static int n_rho_mg = 100;//hard coded for now
 static int n_tem_mg = 69;
+// Precomputed log-space grid parameters for uniform-log multigroup table.
+// Set in MultiReadOpacityTable(); used by fre_rossopacity() and MultiOpacity().
+static Real log_tmin_mg, log_rhomin_mg;
+static Real inv_dlogT_mg, inv_dlogrho_mg;
+// Opacity floor (cm^2/g) applied when rho_cgs < 10^log_rhomin_mg.
+static Real kappa_floor;
 void MultiOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
 void fre_rossopacity(const Real rho, const Real tgas, const int fre_group,
                      Real &kappa, Real &kappa_planck);
@@ -198,6 +204,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
   n_rho_mg = pin->GetOrAddInteger("problem" ,"n_rho_mg", 100);
   n_tem_mg = pin->GetOrAddInteger("problem" ,"n_tem_mg", 100);
+  kappa_floor = pin->GetOrAddReal("problem", "kappa_floor", 1.0e-8);
 
   //frequency dependent opacity
   
@@ -1068,10 +1075,6 @@ void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 	  kappa_ross = kappa_sct_ross - kappa_es;
 	  kappa_s = kappa_es;
 	}
-	// //assume a simple constant opacity for test
-	// kappa_s = 0.32;
-	// kappa_ross = 1.0;
-	// kappa_planck = 1.0;
 
 	//one frequency
 	pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
@@ -1200,7 +1203,9 @@ void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kap
 void MultiReadOpacityTable() {
   Real kb  = 1.3807e-16;
   Real kev = 1.60218e-12 * 1.e3;
+  
   if ((opacity_file != "None") && (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED)){
+    
     fre_grid.NewAthenaArray(nfre);
     fre_temp_grid.NewAthenaArray(n_tem_mg);
     fre_rho_grid.NewAthenaArray(n_rho_mg);
@@ -1279,6 +1284,25 @@ void MultiReadOpacityTable() {
 
     fclose(f_fre_table);
 
+    // Assume uniform spacing in log10(T) and log10(rho); compute params once.
+    log_tmin_mg    = log10(fre_temp_grid(0));
+    log_rhomin_mg  = log10(fre_rho_grid(0));
+    inv_dlogT_mg   = (Real)(n_tem_mg - 1)
+                     / (log10(fre_temp_grid(n_tem_mg - 1)) - log_tmin_mg);
+    inv_dlogrho_mg = (Real)(n_rho_mg - 1)
+                     / (log10(fre_rho_grid(n_rho_mg - 1)) - log_rhomin_mg);
+
+    // Convert per-bin tables to log10 in-place, guarding against zero entries.
+    const Real tiny_kappa = 1.0e-30;
+    for (int k=0; k<nfre; ++k){
+      for (int j=0; j<n_tem_mg; ++j){
+        for (int i=0; i<n_rho_mg; ++i){
+          fre_ross_table(k,j,i)   = log10(std::max(fre_ross_table(k,j,i),   tiny_kappa));
+          fre_planck_table(k,j,i) = log10(std::max(fre_planck_table(k,j,i), tiny_kappa));
+        }
+      }
+    }
+
   }
 }
 
@@ -1342,166 +1366,93 @@ void ReadOpacityTable(){
 
 }
 
+// Per-bin opacity interpolation with uniform logT-logrho grid.
+// Tables are stored as log10(kappa); interpolation is bilinear in log space.
+// Replicate what we did in AthenaK
 void fre_rossopacity(const Real rho, const Real tgas, const int fre_group,
                      Real &kappa, Real &kappa_planck)
 {
+    // STEP 1: fractional-index positions in log space.
+    Real logT   = log10(std::max(tgas, 1.0e-10));
+    Real logrho = log10(std::max(rho, 1.0e-32));
 
-    Real kappa_gray = 0.0;
-    Real kappa_planck_gray = 0.0;
+    Real posT   = (logT - log_tmin_mg  ) * inv_dlogT_mg;
+    Real posrho = (logrho - log_rhomin_mg) * inv_dlogrho_mg;
 
-    int nrho1 = 0;
-    int nrho2 = 0;
-
-    while(( rho > fre_rho_grid(nrho2)) && (nrho2 < n_rho_mg-1)){
-      nrho1 = nrho2;
-      nrho2++;
+    // STEP 2: base/upper indices and in-cell fractions, with edge clamping.
+    int nt1, nt2;
+    Real fT;
+    if (posT <= 0.0) {
+      nt1 = 0;
+      nt2 = 0;
+      fT = 0.0;
+    } else if (posT >= static_cast<Real>(n_tem_mg - 1)) {
+      nt1 = n_tem_mg - 1;
+      nt2 = n_tem_mg - 1;
+      fT = 0.0;
+    } else {
+      nt1 = static_cast<int>(std::floor(posT));
+      nt2 = nt1 + 1;
+      fT  = posT - static_cast<Real>(nt1);
     }
-    if(nrho2==n_rho_mg-1 && (rho > fre_rho_grid(nrho2)))
-      nrho1=nrho2;
 
-
-    int nt1 = 0;
-    int nt2 = 0;
-    while((tgas > fre_temp_grid(nt2)) && (nt2 < n_tem_mg-1)){
-      nt1 = nt2;
-      nt2++;
+    int nrho1, nrho2;
+    Real frho;
+    if (posrho <= 0.0) {
+      nrho1 = 0;
+      nrho2 = 0;
+      frho = 0.0;
+    } else if (posrho >= static_cast<Real>(n_rho_mg - 1)) {
+      nrho1 = n_rho_mg - 1;  nrho2 = n_rho_mg - 1;  frho = 0.0;
+    } else {
+      nrho1 = static_cast<int>(std::floor(posrho));
+      nrho2 = nrho1 + 1;
+      frho  = posrho - static_cast<Real>(nrho1);
     }
-    if(nt2==n_tem_mg-1 && (tgas > fre_temp_grid(nt2)))
-      nt1=nt2;
 
+    // STEP 3: read 4 corners in logkappa.
+    Real lkr_11 = fre_ross_table(fre_group, nt1, nrho1);
+    Real lkr_12 = fre_ross_table(fre_group, nt1, nrho2);
+    Real lkr_21 = fre_ross_table(fre_group, nt2, nrho1);
+    Real lkr_22 = fre_ross_table(fre_group, nt2, nrho2);
 
-    Real kappa_t1_rho1=fre_ross_table(fre_group,nt1,nrho1);
-    Real kappa_t1_rho2=fre_ross_table(fre_group,nt1,nrho2);
-    Real kappa_t2_rho1=fre_ross_table(fre_group,nt2,nrho1);
-    Real kappa_t2_rho2=fre_ross_table(fre_group,nt2,nrho2);
+    Real lkp_11 = fre_planck_table(fre_group, nt1, nrho1);
+    Real lkp_12 = fre_planck_table(fre_group, nt1, nrho2);
+    Real lkp_21 = fre_planck_table(fre_group, nt2, nrho1);
+    Real lkp_22 = fre_planck_table(fre_group, nt2, nrho2);
 
-    Real kappa_t1_rho1_gray=full_ross_table(nt1,nrho1);
-    Real kappa_t1_rho2_gray=full_ross_table(nt1,nrho2);
-    Real kappa_t2_rho1_gray=full_ross_table(nt2,nrho1);
-    Real kappa_t2_rho2_gray=full_ross_table(nt2,nrho2);
+    // STEP 4: above Tmax, apply Kramers T^-3.5 to both Rosseland and Planck
+    // for every bin.  TODO: replace by per-bin dlog(kappa_nu)/dlog(T) slope.
+    Real log_tmax_mg = log_tmin_mg
+                     + static_cast<Real>(n_tem_mg - 1) / inv_dlogT_mg;
+    if (logT > log_tmax_mg) {
+      Real logscale = -3.5 * (logT - log_tmax_mg);
+      lkr_11 += logscale;
+      lkr_12 += logscale;
+      
+      lkr_21 += logscale;
+      lkr_22 += logscale;
+      
+      lkp_11 += logscale;
+      lkp_12 += logscale;
+      
+      lkp_21 += logscale;
+      lkp_22 += logscale;
+    }
 
-    Real planck_t1_rho1=fre_planck_table(fre_group,nt1,nrho1);
-    Real planck_t1_rho2=fre_planck_table(fre_group,nt1,nrho2);
-    Real planck_t2_rho1=fre_planck_table(fre_group,nt2,nrho1);
-    Real planck_t2_rho2=fre_planck_table(fre_group,nt2,nrho2);
+    // STEP 5: bilinear in log space.
+    Real w11 = (1.0 - fT) * (1.0 - frho);
+    Real w12 = (1.0 - fT) * frho;
+    Real w21 = fT * (1.0 - frho);
+    Real w22 = fT * frho;
 
-    Real planck_t1_rho1_gray=full_planck_table(nt1,nrho1);
-    Real planck_t1_rho2_gray=full_planck_table(nt1,nrho2);
-    Real planck_t2_rho1_gray=full_planck_table(nt2,nrho1);
-    Real planck_t2_rho2_gray=full_planck_table(nt2,nrho2);
+    Real log_kappa_ross = w11*lkr_11 + w12*lkr_12 + w21*lkr_21 + w22*lkr_22;
+    Real log_kappa_planck = w11*lkp_11 + w12*lkp_12 + w21*lkp_21 + w22*lkp_22;
 
-    Real rho_1 = fre_rho_grid(nrho1);
-    Real rho_2 = fre_rho_grid(nrho2);
-
-    Real t_1 = fre_temp_grid(nt1);
-    Real t_2 = fre_temp_grid(nt2);
-
-
-    if(nrho1 == nrho2){
-      if(nt1 == nt2){
-        kappa = kappa_t1_rho1;
-      }else{
-        kappa = kappa_t1_rho1 + (kappa_t2_rho1 - kappa_t1_rho1) *
-                                (tgas - t_1)/(t_2 - t_1);
-      }/* end same T*/
-    }else{
-      if(nt1 == nt2){
-        kappa = kappa_t1_rho1 + (kappa_t1_rho2 - kappa_t1_rho1) *
-                                (rho - rho_1)/(rho_2 - rho_1);
-      }else{
-        kappa = kappa_t1_rho1 * (t_2 - tgas) * (rho_2 - rho)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t2_rho1 * (tgas - t_1) * (rho_2 - rho)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t1_rho2 * (t_2 - tgas) * (rho - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + kappa_t2_rho2 * (tgas - t_1) * (rho - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1));
-      }
-    }/* end same rhoT */
-
-    // Now for planck mean opacity
-    if(nrho1 == nrho2){
-      if(nt1 == nt2){
-        kappa_planck = planck_t1_rho1;
-        kappa_planck_gray = planck_t1_rho1_gray;
-        //find the temperatures for each density point that converging to grey planck mean opacity
-        if (kappa_planck==kappa_planck_gray){
-          //printf("temp:%g, rho:%g, ifreq:%d, kappa_p:%g, kappa_p_gray:%g\n", tgas, rho, fre_group, kappa_planck, kappa_planck_gray);
-          Real evtohz = 2.41838e14;
-          Real nu_kev = fre_grid(fre_group);
-          Real nu_hz = nu_kev*1000*evtohz;
-//          kappa_planck = kappa_ff_nu(nu_hz, tgas, rho);
-        }
-      }else{
-        kappa_planck = planck_t1_rho1 + (planck_t2_rho1 - planck_t1_rho1) *
-                                (tgas - t_1)/(t_2 - t_1);
-        kappa_planck_gray = planck_t1_rho1_gray + (planck_t2_rho1_gray - planck_t1_rho1_gray)
-                          *(tgas - t_1)/(t_2 - t_1);
-        //find the temperatures for each density point that converging to grey planck mean opacity
-        if (kappa_planck==kappa_planck_gray){
-          //printf("temp:%g, rho:%g, ifreq:%d, kappa_p:%g, kappa_p_gray:%g\n", tgas, rho, fre_group, kappa_planck, kappa_planck_gray);
-          Real evtohz = 2.41838e14;
-          Real nu_kev = fre_grid(fre_group);
-          Real nu_hz = nu_kev*1000*evtohz;
-//          kappa_planck = kappa_ff_nu(nu_hz, tgas, rho);
-        }
-
-      }/* end same T*/
-    }else{
-      if(nt1 == nt2){
-        kappa_planck = planck_t1_rho1 + (planck_t1_rho2 - planck_t1_rho1) *
-                                (rho - rho_1)/(rho_2 - rho_1);
-        kappa_planck_gray = planck_t1_rho1_gray + (planck_t1_rho2_gray - planck_t1_rho1_gray)\
-                                      *(rho - rho_1)/(rho_2 - rho_1);
-
-        //find the temperatures for each density point that converging to grey planck mean opacity
-        if (kappa_planck==kappa_planck_gray){
-          //printf("temp:%g, rho:%g, ifreq:%d, kappa_p:%g, kappa_p_gray:%g\n", tgas, rho, fre_group, kappa_planck, kappa_planck_gray);
-          Real evtohz = 2.41838e14;
-          Real nu_kev = fre_grid(fre_group);
-          Real nu_hz = nu_kev*1000*evtohz;
-//          kappa_planck = kappa_ff_nu(nu_hz, tgas, rho);
-        }
-      }else{
-        kappa_planck = planck_t1_rho1 * (t_2 - tgas) * (rho_2 - rho)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + planck_t2_rho1 * (tgas - t_1) * (rho_2 - rho)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + planck_t1_rho2 * (t_2 - tgas) * (rho - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1))
-              + planck_t2_rho2 * (tgas - t_1) * (rho - rho_1)/
-                                ((t_2 - t_1) * (rho_2 - rho_1));
-
-        kappa_planck_gray = planck_t1_rho1_gray * (t_2 - tgas) * (rho_2 - rho)\
-                                /((t_2 - t_1) * (rho_2 - rho_1))\
-              + planck_t2_rho1_gray * (tgas - t_1) * (rho_2 - rho)\
-                                /((t_2 - t_1) * (rho_2 - rho_1))\
-              + planck_t1_rho2_gray * (t_2 - tgas) * (rho - rho_1)\
-                                /((t_2 - t_1) * (rho_2 - rho_1))\
-              + planck_t2_rho2_gray * (tgas - t_1) * (rho - rho_1)\
-                                /((t_2 - t_1) * (rho_2 - rho_1));
-
-        //find the temperatures for each density point that converging to grey planck mean opacity
-        if (kappa_planck==kappa_planck_gray){
-          //printf("temp:%g, rho:%g, ifreq:%d, kappa_p:%g, kappa_p_gray:%g\n", tgas, rho, fre_group, kappa_planck, kappa_planck_gray);
-          Real evtohz = 2.41838e14;
-          Real nu_kev = fre_grid(fre_group);
-          Real nu_hz = nu_kev*1000*evtohz;
-	  //kappa_planck = kappa_ff_nu(nu_hz, tgas, rho);
-        }
-        //try keep ambient gas opacity low
-        //if (rho <= 1.01*d_amb * rho_unit){
-        //  Real evtohz = 2.41838e14;
-        //  Real nu_kev = fre_grid(fre_group);
-        //  Real nu_hz = nu_kev*1000*evtohz;
-        //  kappa_planck = kappa_ff_nu(nu_hz, 1.0e3, rho);
-        //}
-      }
-    }/* end same rhoT */
+    kappa  = std::pow(10.0, log_kappa_ross);
+    kappa_planck = std::pow(10.0, log_kappa_planck);
 
     return;
-
 }
 
 
@@ -1525,52 +1476,69 @@ void MultiOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
   }
   
   // electron scattering opacity
-  Real kappas = 0.2 * (1.0 + 0.6);
   Real kappa_ross = 0.0;
   Real kappa_sct = 0.0;
-  
+
+  //(TODO) make this read in
   Real T_ion = 1.0e4;//ionization temperature, below which assuming kappa_scatter=0
-  Real T_llim = 1.0e4;//lower lim of TOPs data
-  Real T_dust = 4.0e3;//where roughly opacity rises again due to dust, what to do for this?
-  
+  //Real T_llim = 1.0e4;//lower lim of TOPs data
+  Real T_recomb = 3.0e3;//below this hydrogen is mainly neutral
+
+  // Below the table's rho_min, bypass the table and set all opacities to a
+  // configurable floor (kappa_floor, cgs).  This prevents noise from
+  // repeatedly interpolating against the edge row of the opacity table.
+  Real rho_min_cgs = std::pow(10.0, log_rhomin_mg);
+
   for (int k=kl; k<=ku; ++k) {
   for (int j=jl; j<=ju; ++j) {
   for (int i=il; i<=iu; ++i) {
-    
-  for (int ifr=0; ifr<prad->nfreq; ++ifr){
+
     Real rho  = prim(IDN,k,j,i);
     Real gast = std::max(prim(IEN,k,j,i)/rho, tfloor);
-
-    Real kappa_ross_sct, kappa_planck;
-
-    //to user the fre_rossopacity func, make rho, gast -> c.g.s
-    //function also return in c.g.s
     Real rho_cgs = rho * rho_unit;
     Real gast_cgs = gast * temp_unit;
 
-    fre_rossopacity(rho_cgs, gast_cgs, ifr, kappa_ross_sct, kappa_planck);
-
-    //wouldn't need this if kappa_ross_sct is assigned to sigma_a as total
-    if(kappa_ross_sct < kappas){ 
-      if(gast < T_ion){
-        kappa_ross = kappa_ross_sct;
-        kappa_sct = 0.0;
-      }else{
-        kappa_ross = 0.0;
-	kappa_sct = kappa_ross_sct;
+    if (rho_cgs < rho_min_cgs){
+      for (int ifr=0; ifr<prad->nfreq; ++ifr){
+        prad->sigma_s(k,j,i,ifr)  = rho * kappa_floor / kappa_unit;
+        prad->sigma_a(k,j,i,ifr)  = rho * kappa_floor / kappa_unit;
+        prad->sigma_pe(k,j,i,ifr) = rho * kappa_floor / kappa_unit;
+        prad->sigma_p(k,j,i,ifr)  = rho * kappa_floor / kappa_unit;
       }
-    }else{
-      kappa_ross = kappa_ross_sct - kappas;
-      kappa_sct = kappas;
+      continue;
     }
 
-    prad->sigma_s(k,j,i,ifr) = rho * kappa_sct * rho_unit  * l_unit;
-    prad->sigma_a(k,j,i,ifr) = rho * kappa_ross * rho_unit * l_unit;
-    prad->sigma_pe(k,j,i,ifr) = rho * kappa_planck * rho_unit * l_unit;
-    prad->sigma_p(k,j,i,ifr) = rho * kappa_planck * rho_unit * l_unit;
+    for (int ifr=0; ifr<prad->nfreq; ++ifr){
 
-  }
+      Real kappa_ross_sct, kappa_planck;
+      fre_rossopacity(rho_cgs, gast_cgs, ifr, kappa_ross_sct, kappa_planck);
 
- }}}
+      //wouldn't need this if kappa_ross_sct is assigned to sigma_a as total
+      if(kappa_ross_sct < kappa_es){
+        if(gast < T_ion){
+          kappa_ross = kappa_ross_sct;
+          kappa_sct = 0.0;
+        }else{
+          kappa_ross = 0.0;
+          kappa_sct = fmax(kappa_ross_sct, 0.0);
+        }
+      }else{
+	if (gast > T_recomb){
+	  kappa_ross = fmax(kappa_ross_sct - kappa_es, 0.0);
+	  kappa_sct = kappa_es;
+	}else{//cold gas with no ionized hydrogen
+	  kappa_ross = kappa_ross_sct;
+	  kappa_sct = 0.0;
+	}
+      }
+
+      prad->sigma_s(k,j,i,ifr)  = rho * kappa_sct    / kappa_unit;
+      prad->sigma_a(k,j,i,ifr)  = rho * kappa_ross   / kappa_unit;
+      prad->sigma_pe(k,j,i,ifr) = rho * kappa_planck / kappa_unit;
+      prad->sigma_p(k,j,i,ifr)  = rho * kappa_planck / kappa_unit;
+
+    }
+
+  }}}//end kji
 
 }
