@@ -705,7 +705,7 @@ void StreamInjectOuterX3(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	//distance to injection point
 	Real dis_to_inj = sqrt((x_now - x_inj)*(x_now - x_inj)
 			       + (y_now - y_inj)*(y_now - y_inj)
-			       + (z_now - z_inj)*(z_now - z_inj)
+			       //+ (z_now - z_inj)*(z_now - z_inj) //only calculate cylindrical distance
 			       );
 	if (dis_to_inj < r_inj_thresh){
 	  //printf("xnow:%g, ynow:%g, znow:%g, dis_to_inj:%g, r_inj_thresh:%g\n", x_now, y_now, z_now,  dis_to_inj, r_inj_thresh);
@@ -729,8 +729,8 @@ void StreamInjectOuterX3(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	}else{
 	  prim(IDN,ku+k,j,i) = prim(IDN,ku,j,i);
 	  prim(IVX,ku+k,j,i) = prim(IVX,ku,j,i);
-	  prim(IVY,ku+k,j,i) = prim(IVZ,ku,j,i);
-	  prim(IVZ,ku+k,j,i) = std::max(0.0, prim(IVY,ku,j,i));
+	  prim(IVY,ku+k,j,i) = prim(IVY,ku,j,i);
+	  prim(IVZ,ku+k,j,i) = std::max(0.0, prim(IVZ,ku,j,i));
 	  if (NON_BAROTROPIC_EOS){
 	    prim(IPR,ku+k,j,i) = prim(IPR,ku,j,i); 
 	  }
