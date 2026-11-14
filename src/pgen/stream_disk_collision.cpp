@@ -158,8 +158,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   vel_unit = pin->GetReal("problem", "vel_unit");
   time_unit = l_unit/vel_unit;
 
-  tfloor = pin->GetOrAddReal("radiation", "tfloor", 0.001); 
+  tfloor = pin->GetOrAddReal("radiation", "tfloor", 0.001);
   dfloor = pin->GetOrAddReal("hydro", "dfloor", 0.001);
+  pfloor = pin->GetOrAddReal("hydro", "pfloor", 0.001);
   d_amb = pin->GetOrAddReal("problem", "d_amb", 0.0001);
   p_amb = pin->GetOrAddReal("problem", "p_amb", 0.001);
 
@@ -177,9 +178,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   z_disk_mid = pin->GetOrAddReal("problem", "z_disk_mid", 0.0);
   disk_grav_flag = pin->GetOrAddInteger("problem", "disk_grav_flag", 0);
   grav_disk = pin->GetOrAddReal("problem", "grav_disk", 0.0);
-  disk_scalar_frac = pin->GetOrAddReal("problem", "grav_disk", 4.0); //number of scale heigh to paint disk scalar
+  disk_scalar_frac = pin->GetOrAddReal("problem", "disk_scalar_frac", 4.0); //number of scale heigh to paint disk scalar
 
-  uniform_stream = pin->GetOrAddReal("problem", "uniform_stream", 0.0);
+  uniform_stream = pin->GetOrAddInteger("problem", "uniform_stream", 0);
   inj_inner_x1 = pin->GetOrAddInteger("problem", "inj_inner_x1", 0);
   inj_outer_x2 = pin->GetOrAddInteger("problem", "inj_outer_x2", 0);
   r_inj_thresh = pin->GetOrAddReal("problem", "r_inj_thresh", 0.0);
@@ -228,7 +229,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StreamInjectOuterX3);
   }
 
-  if (NR_RADIATION_ENABLED){
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::outer_x2] == GetBoundaryFlag("user")) {
       if (inj_outer_x2==1 && inj_inner_x1==0)
@@ -245,7 +246,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       EnrollUserBoundaryFunction(BoundaryFace::inner_x1, StreamInjectInnerX1);
   }
 
-  if (NR_RADIATION_ENABLED){
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
       if (inj_outer_x2==0 && inj_inner_x1==1)
@@ -302,7 +303,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   // SetUserOutputVariableName(5, "GravSrc_m2_IEN");
 
   //enroll opacity function here
-  if (NR_RADIATION_ENABLED){
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
     if (pnrrad->nfreq==1){
       if (opacity_type=="table"){
 	pnrrad->EnrollOpacityFunction(GetCombineOpacity);//
@@ -378,60 +379,87 @@ void Mesh::UserWorkInLoop(){
   //find pressure increase region
   for(int nb=0; nb<nblocal; ++nb){ //loop over meshblocks on the same core
     MeshBlock *pmb = my_blocks(nb);
-    ParameterInput *pin;
 
     Hydro *phydro = pmb->phydro;
     Coordinates *pcoord = pmb->pcoord;
-    int ks=pmb->ks, ke=pmb->ke, js=pmb->js, je=pmb->je, is=pmb->is, ie=pmb->ie;
-         
+    Real gamma_gas = pmb->peos->GetGamma();
+
     for(int k=pmb->ks; k<=pmb->ke; k++){
-      for(int i=pmb->is; i<=pmb->ie; i++){
-    	for(int j=pmb->js; j<=pmb->je; j++){
-	  
-	  Real rho = phydro->u(IDN,k,j,i);
-	  Real press = phydro->w(IPR,k,j,i);
-	  Real temp = phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
+      for(int j=pmb->js; j<=pmb->je; j++){
+    	for(int i=pmb->is; i<=pmb->ie; i++){
 
 	  // debug
 	  for (int n=0; n<(NHYDRO); n++){
 	    if (std::isnan(phydro->u(n,k,j,i))){
-	      printf("x1v:%g, x2v:%g, n:%d eint:%g, rho:%g, gid:%d, k:%d, j:%d, i:%d\n", pcoord->x1v(i), pcoord->x2v(j), n, phydro->u(IEN,k,j,i), phydro->u(IDN,k,j,i), pmb->gid, k, j, i);
-		abort();
-	      }
+	      std::stringstream msg;
+	      msg << "### FATAL ERROR: NaN detected in hydro conserved vars"
+	          << " x1v=" << pcoord->x1v(i)
+	          << " x2v=" << pcoord->x2v(j)
+	          << " x3v=" << pcoord->x3v(k)
+	          << " n=" << n
+	          << " IEN=" << phydro->u(IEN,k,j,i)
+	          << " IDN=" << phydro->u(IDN,k,j,i)
+	          << " gid=" << pmb->gid
+	          << " k=" << k << " j=" << j << " i=" << i << std::endl;
+	      ATHENA_ERROR(msg);
+	    }
 	  }
 
-	  // limit velocity
-	  Real vel1 = pmb->phydro->w(IVX,k,j,i);
-	  Real vel2 = pmb->phydro->w(IVY,k,j,i);
-	  Real vel3 = pmb->phydro->w(IVZ,k,j,i);
-	  Real c_light = Constants::speed_of_light_cgs/vel_unit; 
+	  // limit velocity: update both primitives and conservatives so that the
+	  // next ConsToPrim does not overwrite the limiter
+	  Real vel1 = phydro->w(IVX,k,j,i);
+	  Real vel2 = phydro->w(IVY,k,j,i);
+	  Real vel3 = phydro->w(IVZ,k,j,i);
+	  Real c_light = Constants::speed_of_light_cgs/vel_unit;
 	  Real vel_mag = sqrt(vel1*vel1 + vel2*vel2 + vel3*vel3);
 
 	  if (vel_mag >= c_light){
-	    //printf("bad cell, rho:%g, press:%g, ie:%g, temp:%g, vel1:%g, vel2:%g, x1v:%g, x2v:%g\n", rho, press, phydro->u(IEN,k,j,i), temp, phydro->w(IVX,k,j,i), phydro->w(IVY,k,j,i), pmb->pcoord->x1v(i), pmb->pcoord->x2v(j));
-	    pmb->phydro->w(IVX,k,j,i) = (vel1 >=0) ? std::min(vel1, 0.99*c_light) : std::max(vel1, -0.99*c_light);
-	    pmb->phydro->w(IVY,k,j,i) = (vel2 >=0) ? std::min(vel2, 0.99*c_light) : std::max(vel2, -0.99*c_light);
-	    pmb->phydro->w(IVZ,k,j,i) = vel3 = (vel3 >=0) ? std::min(vel3, 0.99*c_light) : std::max(vel3, -0.99*c_light);
+	    Real v1n = (vel1 >=0) ? std::min(vel1, 0.99*c_light) : std::max(vel1, -0.99*c_light);
+	    Real v2n = (vel2 >=0) ? std::min(vel2, 0.99*c_light) : std::max(vel2, -0.99*c_light);
+	    Real v3n = (vel3 >=0) ? std::min(vel3, 0.99*c_light) : std::max(vel3, -0.99*c_light);
+	    phydro->w(IVX,k,j,i) = v1n;
+	    phydro->w(IVY,k,j,i) = v2n;
+	    phydro->w(IVZ,k,j,i) = v3n;
+	    Real dens = phydro->u(IDN,k,j,i);
+	    if (NON_BAROTROPIC_EOS){
+	      // preserve internal energy, replace kinetic energy
+	      Real ke_old = 0.5*(SQR(phydro->u(IM1,k,j,i))+SQR(phydro->u(IM2,k,j,i))
+	                         +SQR(phydro->u(IM3,k,j,i)))/dens;
+	      Real ke_new = 0.5*dens*(v1n*v1n + v2n*v2n + v3n*v3n);
+	      phydro->u(IEN,k,j,i) += (ke_new - ke_old);
+	    }
+	    phydro->u(IM1,k,j,i) = dens*v1n;
+	    phydro->u(IM2,k,j,i) = dens*v2n;
+	    phydro->u(IM3,k,j,i) = dens*v3n;
 	  }
 
 	  //excise BH ISCO
-	  Real x = pmb->pcoord->x1v(i);
-	  Real y = pmb->pcoord->x2v(j);
-	  Real z = pmb->pcoord->x3v(k);
+	  Real x = pcoord->x1v(i);
+	  Real y = pcoord->x2v(j);
+	  Real z = pcoord->x3v(k);
 
 	  Real r = sqrt((x - x_bh) * (x - x_bh)
 			+ (y - y_bh) * (y - y_bh)
 			+ (z - z_bh) * (z - z_bh));
 
 	  if (r < r_excise){
-	    
-	    pmb->phydro->w(IDN,k,j,i) = dfloor;
-	    pmb->phydro->w(IVX,k,j,i) = 0.0;
-	    pmb->phydro->w(IVY,k,j,i) = 0.0;
-	    pmb->phydro->w(IVZ,k,j,i) = 0.0;
-	    pmb->phydro->w(IPR,k,j,i) = pfloor;
 
-	    if (NR_RADIATION_ENABLED){
+	    phydro->w(IDN,k,j,i) = dfloor;
+	    phydro->w(IVX,k,j,i) = 0.0;
+	    phydro->w(IVY,k,j,i) = 0.0;
+	    phydro->w(IVZ,k,j,i) = 0.0;
+	    phydro->w(IPR,k,j,i) = pfloor;
+
+	    // mirror into conservatives so the excision survives the next ConsToPrim
+	    phydro->u(IDN,k,j,i) = dfloor;
+	    phydro->u(IM1,k,j,i) = 0.0;
+	    phydro->u(IM2,k,j,i) = 0.0;
+	    phydro->u(IM3,k,j,i) = 0.0;
+	    if (NON_BAROTROPIC_EOS){
+	      phydro->u(IEN,k,j,i) = pfloor/(gamma_gas - 1.0);
+	    }
+
+	    if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
 	      for (int ifr=0; ifr<pmb->pnrrad->nfreq; ++ifr){
 		for(int n=0; n<pmb->pnrrad->nang; ++n){
 		  int ang=ifr * pmb->pnrrad->nang+n;
@@ -442,8 +470,8 @@ void Mesh::UserWorkInLoop(){
 	  }//r_excise
 
 
-	}//j
-      }//i
+	}//i
+      }//j
     }//k
 
 
@@ -516,7 +544,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
                                        + SQR(phydro->u(IM3,k,j,i)))/phydro->u(IDN,k,j,i);
 	}//end non barotropic
 
-	if (NR_RADIATION_ENABLED){
+	if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
 
 	  //Real rho = rho_now;//phydro->w(IDN,k,j,i);
 	  Real temp_now = pgas_now / dens_now;
@@ -597,10 +625,14 @@ void Phi_BH_DiskGrav(MeshBlock *pmb, const Real time, const Real dt, const Athen
 		      + (y - y_bh) * (y - y_bh)
 		      + (z - z_bh) * (z - z_bh));
 
+	// skip excised region 
+	if (r < r_excise)
+	  continue;
+
 	Real dx = prim(IVX, k,j,i);
 	Real dy = prim(IVY, k,j,i);
 	Real dz = prim(IVZ, k,j,i);
-	  
+
 	//acceleration components
 	Real ax = - GM_bh / (r * r) * (x - x_bh)/r;
 	Real ay = - GM_bh / (r * r) * (y - y_bh)/r;
@@ -640,7 +672,7 @@ void StreamInjectOuterX2(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 			 int il, int iu, int jl, int ju, int kl, int ku, int ngh){
 
   for (int k=kl; k<=ku; ++k) {
-    for (int j=1; j<=NGHOST; ++j) {
+    for (int j=1; j<=ngh; ++j) {
       for (int i=il; i<=iu; ++i) {
 	
 	//get currtent Cartesian coordinates
@@ -693,7 +725,7 @@ void StreamInjectOuterX3(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 			 Real time, Real dt,
 			 int il, int iu, int jl, int ju, int kl, int ku, int ngh){
 
-  for (int k=1; k<=NGHOST; ++k) {
+  for (int k=1; k<=ngh; ++k) {
     for (int j=jl; j<=ju; ++j) {
       for (int i=il; i<=iu; ++i) {
 	
@@ -801,7 +833,7 @@ void StreamInjectInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 
   for (int k=kl; k<=ku; ++k) {
     for (int j=jl; j<=ju; ++j) {
-      for (int i=1; i<=NGHOST; ++i) {
+      for (int i=1; i<=ngh; ++i) {
 	
 	//get currtent Cartesian coordinates
 	Real x_now = pco->x1v(il-i);
