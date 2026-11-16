@@ -714,7 +714,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 	Real frad_local = lum_base / (4.0*PI*r_local*r_local);
 	//printf("frad_local:%g, lum_base:%g, r_local:%g\n", frad_local, lum_base, r_local);
 	//add a grandually increasing factor
-	if (time>0.0 && time<t_lum_base_ramp){
+	if (time < t_lum_base_ramp){
 	    frad_local = frad_local * (1.0 - exp(-time/t_lum_base_ramp));
 	}
 
@@ -760,7 +760,7 @@ void ConstFluxInnerX1(MeshBlock *pmb, Coordinates *pco, NRRadiation *pnrrad,
 
 	  //oapcity of current cell, assuming using first active cell
 	  Real sigma_local_ifr = 0.0;
-	  if (time>0.0)
+	  if (time > 0.0)
 	    sigma_local_ifr = pnrrad->sigma_a(k,j,is,ifr);
 	
 	  //energy density of first active cell
@@ -829,8 +829,9 @@ void ConstMdotInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 	Real vel_now = vel_wind_base;
 	
 	Real lum_base_now = lum_base;
-	if (time>0.0 && time<t_lum_base_ramp){
+	if (time < t_lum_base_ramp){
 	   rho_now = rho_wind_base * (1.0 - exp(-time/t_lum_base_ramp));
+	   rho_now = std::max(rho_now, dfloor);
 	   lum_base_now = lum_base * (1.0 - exp(-time/t_lum_base_ramp));
 	}
 	
