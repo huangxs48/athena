@@ -1516,7 +1516,7 @@ void MultiOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
 
       //wouldn't need this if kappa_ross_sct is assigned to sigma_a as total
       if(kappa_ross_sct < kappa_es){
-        if(gast < T_ion){
+        if(gast_cgs < T_ion){
           kappa_ross = kappa_ross_sct;
           kappa_sct = 0.0;
         }else{
@@ -1524,7 +1524,7 @@ void MultiOpacity(MeshBlock *pmb, AthenaArray<Real> &prim)
           kappa_sct = fmax(kappa_ross_sct, 0.0);
         }
       }else{
-	if (gast > T_recomb){
+	if (gast_cgs > T_recomb){
 	  kappa_ross = fmax(kappa_ross_sct - kappa_es, 0.0);
 	  kappa_sct = kappa_es;
 	}else{//cold gas with no ionized hydrogen
