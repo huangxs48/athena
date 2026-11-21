@@ -43,10 +43,14 @@ static Real r_isco;
 
 //Injection point
 static Real x_inj, y_inj, z_inj, local_dens, local_vx, local_vy, local_vz, local_press;
+static Real h_stream;
+static Real temp_stream;
 int inj_print_flag;
+int uniform_stream;
+int user_fallback_rate;
+Real mdot_norm;
 //Initialize domain
 static Real rho_init, press_init;
-static Real temp_stream;
 
 //opacity tables
 static AthenaArray<Real> opacitytable;
@@ -57,16 +61,40 @@ static AthenaArray<Real> logttable_planck;
 static AthenaArray<Real> logrhottable_planck;
 
 //new combined opacity table
+//new combined opacity table
+static int n_rho;
+static int n_tem;
+std::string  opacity_file;
+std::string  opacity_type;
 static AthenaArray<Real> combine_temp_grid;
 static AthenaArray<Real> combine_rho_grid;
 static AthenaArray<Real> combine_ross_table;
 static AthenaArray<Real> combine_planck_table;
-static int n_rho = 140;
-static int n_tem = 70;
+
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+void ReadOpacityTable();
+
+//opacity table that is uniform in temp and rho 
+static AthenaArray<Real> uniform_temp_grid; //cgs
+static AthenaArray<Real> uniform_rho_grid; //cgs
+static AthenaArray<Real> uniform_ross_table; //log(kappa_ross_sct)
+static AthenaArray<Real> uniform_planck_table; //log(kappa_planck)
+static Real log_tmin_u, log_rhomin_u;
+static Real inv_dlogT_u, inv_dlogrho_u;
+//kappa floor, cgs 
+static Real kappa_floor;
+//flag to cap kappa_floor by kappa_ross evaluated at the table's rho_min
+static int kappa_floor_cap_planck;
+
 int replace_low_dens_ff;
-Real rho_cut_ff; 
+Real rho_cut_ff;
+
+//update the interpolated table, uniform in temperature and density
+void get_uniform_table_opacity(const Real rho, const Real tgas,
+                               Real &kappa, Real &kappa_planck);
+void UniformTableOapcity(MeshBlock *pmb, AthenaArray<Real> &prim);
+void ReadUniformOpacityTable();
 
 //refinement
 static Real x_thresh, y_thresh, z_thresh;
@@ -153,7 +181,6 @@ Real RadTimeStep(MeshBlock *pmb);
 
 //time dependent mdot
 static int mdot_table_ng; //number of segment groups from spline fitting
-static Real mdot_rho1; //when setting rho=1, the total mdot through phi and theta
 static AthenaArray<Real> mdot_table;
 static AthenaArray<Real> mdot_time_table;
 Real GetMdot(MeshBlock *pmb, Real tnow);
@@ -209,9 +236,15 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   local_vx = pin->GetReal("problem", "local_vx");
   local_vy = pin->GetReal("problem", "local_vy");
   local_vz = pin->GetReal("problem", "local_vz");
+  temp_stream = pin->GetReal("problem", "temp_stream");
+  h_stream = pin->GetOrAddReal("problem", "h_stream", 1.0); 
+  local_press = local_dens*temp_stream/temp_unit;
   inj_print_flag = pin->GetOrAddInteger("problem", "inj_print_flag", 0);
   //local_press = pin->GetReal("problem", "local_press");
   rho1_flag = pin->GetOrAddInteger("problem", "rho1_flag", 0);
+  uniform_stream = pin->GetOrAddInteger("problem", "uniform_stream", 1);
+  user_fallback_rate = pin->GetOrAddInteger("problem", "user_fallback_rate", 0);
+  mdot_norm = pin->GetOrAddReal("problem", "mdot_norm", 1.0);
 
   //x_thresh = pin->GetOrAddReal("problem", "x_thresh", 0.1);  
   //y_thresh = pin->GetOrAddReal("problem", "y_thresh", 0.01);
@@ -229,16 +262,20 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   //Initialize domain
   rho_init = pin->GetReal("problem", "rho_init");
   press_init = pin->GetReal("problem", "press_init");
-  temp_stream = pin->GetReal("problem", "temp_stream");  
-  local_press = local_dens*temp_stream/temp_unit;
 
   //kappa_unit: cm^2/g
   kappa_unit = 1.0/(rho_unit*l_unit);
   kappa_es_code = kappa_es/kappa_unit;
+  opacity_file = pin->GetOrAddString("problem", "opacity_file", "None");
+  opacity_type = pin->GetOrAddString("problem", "opacity_type", "table");
+  n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
+  n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
+  // grey uniform table controls
+  kappa_floor = pin->GetOrAddReal("problem", "kappa_floor", 1.0e-6);
+  kappa_floor_cap_planck = pin->GetOrAddInteger("problem", "kappa_floor_cap_planck", 0);
 
   //mdot table
   mdot_table_ng = pin->GetInteger("problem", "mdot_table_ng");
-  mdot_rho1 = pin->GetReal("problem", "mdot_rho1");
 
   // enroll user-defined boundary condition
   if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
@@ -313,50 +350,50 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x3, RadOuterX3);
     }
 
-    //load combined opacity
-    combine_temp_grid.NewAthenaArray(n_tem);
-    combine_rho_grid.NewAthenaArray(n_rho);
-    combine_ross_table.NewAthenaArray(n_tem, n_rho);
-    combine_planck_table.NewAthenaArray(n_tem, n_rho);
+    // //load combined opacity
+    // combine_temp_grid.NewAthenaArray(n_tem);
+    // combine_rho_grid.NewAthenaArray(n_rho);
+    // combine_ross_table.NewAthenaArray(n_tem, n_rho);
+    // combine_planck_table.NewAthenaArray(n_tem, n_rho);
 
-    FILE *f_combineopacity;
+    // FILE *f_combineopacity;
     
-    if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
-    {
-      printf("Open input file error combined opacity table");
-      return;
-    }
-    //first two lines are n_temp, n_rho
-    int buff;
-    for(int i=0; i<2; i++){
-      fscanf(f_combineopacity,"%d",&(buff));
-    }
+    // if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
+    // {
+    //   printf("Open input file error combined opacity table");
+    //   return;
+    // }
+    // //first two lines are n_temp, n_rho
+    // int buff;
+    // for(int i=0; i<2; i++){
+    //   fscanf(f_combineopacity,"%d",&(buff));
+    // }
 
-    //load temperature grid
-    for(int i=0; i<n_tem; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
-    }
+    // //load temperature grid
+    // for(int i=0; i<n_tem; ++i){
+    //   fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
+    // }
 
-    //load density grid
-    for(int i=0; i<n_rho; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
-    }
+    // //load density grid
+    // for(int i=0; i<n_rho; ++i){
+    //   fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
+    // }
 
-    //load grey Rosseland mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
-      }
-    }
+    // //load grey Rosseland mean opacity
+    // for (int j=0; j<n_tem; ++j){
+    //   for (int i=0; i<n_rho; ++i){
+    // 	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+    //   }
+    // }
 
-    //load grey Planck mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
-      }
-    }
+    // //load grey Planck mean opacity
+    // for (int j=0; j<n_tem; ++j){
+    //   for (int i=0; i<n_rho; ++i){
+    // 	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+    //   }
+    // }
 
-    fclose(f_combineopacity);
+    // fclose(f_combineopacity);
 
     //printf("testing frequency table\n");
     //printf("grey planck:%g, ross:%g\n", combine_planck_table(30, 50), combine_ross_table(30, 50));
@@ -366,7 +403,16 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     
  
   }
-  
+
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
+    if (opacity_file != "None"){
+      if (opacity_type == "uniform_table" && opacity_file != "None"){
+        ReadUniformOpacityTable();
+      } else {
+        ReadOpacityTable();
+      }
+    }//load opacity table
+  }//NR_RADIATION||IM_RADIATION_ENABLED
 
   EnrollUserExplicitSourceFunction(GeneralNewtonianPotentialCart);//(PointMassPotential);
 
@@ -429,7 +475,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
        //injection point
        if (fabs(x_coord-x_inj) <= x_coarse_thresh){
        	 if (fabs(y_coord-y_inj) <= y_coarse_thresh){// if within L1 point
-       	   if (fabs(z_coord - 0.0)<= z_coarse_thresh){
+       	   if (fabs(z_coord - z_inj)<= z_coarse_thresh){
        	     //printf("coarse\n");
 	     //printf("r:%g, ph:%g, th:%g, dis_r:%g, dis_phi:%g, dis_th:%g, i:%d, gid:%d, dr:%g, dph:%g, dth:%g\n", rad, phi_coord, theta_coord, fabs(rad-x_inject), fabs(phi_coord - y_inject), fabs(theta_coord - PI/2.0), i, gid, pcoord->dx1f(i), pcoord->dx3f(k), pcoord->dx2f(j));
        	     iuser_meshblock_data[0](0) = 1;
@@ -454,7 +500,13 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   SetUserOutputVariableName(8, "RadSrc_ein_new");
 
   if (NR_RADIATION_ENABLED){
-    pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(opalopacity);
+    if (opacity_type == "uniform_table" && opacity_file != "None"){
+      pnrrad->EnrollOpacityFunction(UniformTableOapcity);
+    } else {
+      pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(opalopacity);
+    }
+    if (Globals::my_rank==0)
+      std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
   }
 
   return;
@@ -629,44 +681,44 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
                                        + SQR(phydro->u(IM3,k,j,i)))/phydro->u(IDN,k,j,i);
         }//end non barotropic
 
-	if (NR_RADIATION_ENABLED){
+	// if (NR_RADIATION_ENABLED){
 
-	  Real rho = rho_init;
-	  Real temp = press_init/rho_init;
+	//   Real rho = rho_init;
+	//   Real temp = press_init/rho_init;
 
-	  for (int n=0; n<pnrrad->n_fre_ang; n++){
-	    pnrrad->ir(k,j,i,n) = temp * temp * temp * temp;
-	  }
+	//   for (int n=0; n<pnrrad->n_fre_ang; n++){
+	//     pnrrad->ir(k,j,i,n) = temp * temp * temp * temp;
+	//   }
 
-	  Real rho_cgs = rho*rho_unit;
-	  Real temp_cgs = temp*temp_unit;
+	//   Real rho_cgs = rho*rho_unit;
+	//   Real temp_cgs = temp*temp_unit;
 	
-	  Real kappaa = 0.0;
-	  Real kappa_s, kappa_ross, kappa_planck;
-	  combineopacity(rho_cgs, temp_cgs, kappa_ross, kappa_planck);
-	  Real t_ion = 1.0e4;
+	//   Real kappaa = 0.0;
+	//   Real kappa_s, kappa_ross, kappa_planck;
+	//   combineopacity(rho_cgs, temp_cgs, kappa_ross, kappa_planck);
+	//   Real t_ion = 1.0e4;
 	
-	  if(kappa_ross < kappa_es){
-	    if(temp < t_ion/temp_unit){
-	      kappaa = kappa_ross;
-	      kappa_s = 0.0;
-	    }else{
-	      kappaa = 0.0;
-	      kappa_s = kappa_ross;
-	    }
-	  }else{
-	    kappaa = kappa_ross - kappa_es;
-	    kappa_s = kappa_es;
-	  }
+	//   if(kappa_ross < kappa_es){
+	//     if(temp < t_ion/temp_unit){
+	//       kappaa = kappa_ross;
+	//       kappa_s = 0.0;
+	//     }else{
+	//       kappaa = 0.0;
+	//       kappa_s = kappa_ross;
+	//     }
+	//   }else{
+	//     kappaa = kappa_ross - kappa_es;
+	//     kappa_s = kappa_es;
+	//   }
 	
-	  //one frequency
-	  pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
-	  pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //rosseland mean
-	  pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
-	  pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
+	//   //one frequency
+	//   pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
+	//   pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //rosseland mean
+	//   pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
+	//   pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
 	
      
-	}//end rad
+	// }//end rad
 
       }//end i
       
@@ -729,8 +781,8 @@ Real GetMdot(MeshBlock *pmb, Real tnow){
 
   Real mdot_cgs = mdot_interp * (msun/year);
   Real mdot_code = mdot_cgs / mdot_unit;
-  Real local_dens_now = mdot_code / mdot_rho1;
-  //printf("t now:%g, t days:%g, mdot now:%g, local_dens:%g, mdot_code:%g, mdot_rho1:%g\n", tnow, t_days, mdot_interp, local_dens_now, mdot_code, mdot_rho1);
+  Real local_dens_now = mdot_code;
+  //printf("t now:%g, t days:%g, mdot now:%g, local_dens:%g, mdot_code:%g, mdot_rho1:%g\n", tnow, t_days, mdot_interp, local_dens_now, mdot_code, mdot_norm);
 
   
   return local_dens_now;
@@ -805,19 +857,21 @@ void GeneralNewtonianPotentialCart(MeshBlock *pmb, const Real time, const Real d
 void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt,int is, int ie, int js, int je, int ks, int ke, int ngh){
 
   Real t_current = pmb->pmy_mesh->time;
-  Real local_dens_now_;
+  //Real local_dens_now_;
   
-  if (rho1_flag==1){
-    local_dens_now_ = 1.0; //for rho1 run
-  }else{
-    local_dens_now_ = GetMdot(pmb, t_current);
+  Real mdot_now_code = 1.0;
+  
+  if (user_fallback_rate){
+    //local_dens_now_ = GetMdot(pmb, t_current);
+    mdot_now_code = GetMdot(pmb, t_current);
   }
-
+  Real local_dens_now_ = local_dens * mdot_now_code / mdot_norm;
+  
   Real rinj_thresh=inj_thresh;
   
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
-      for (int i=1; i<=NGHOST; ++i) {
+      for (int i=1; i<=ngh; ++i) {
 	
 	//get currtent Cartesian coordinates
 	Real x_now = pco->x1v(ie+i);
@@ -832,28 +886,24 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 
 	//printf("in boundary, d_inj:%g, rinj_thresh:%g\n", d_inj, rinj_thresh);
 	if (d_inj < rinj_thresh){ //injection cells
-          
-          //Real dist = sqrt(r_coord*r_coord + r_inj*r_inj - 2.0*r_coord*r_inj*(sin(th_coord)*sin(th_inj)*cos(ph_coord-ph_inj) + 
-	  //								    cos(th_coord)*cos(th_inj))); //real distance from injection point
-                                                                                                        // (fc) to injection cell (vc)
+
 	  Real dist = d_inj;
 	  if (inj_print_flag==1){
 	    printf("boundary: x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
 	  }
+	  if (uniform_stream == 1){
+	    prim(IDN,k,j,ie+i) = local_dens_now_;
+	  }else{
+	    prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist * dist)/(h_stream * h_stream)/2.0);
+	  }
+	  prim(IVX,k,j,ie+i) = local_vx; 
+	  prim(IVY,k,j,ie+i) = local_vy;
+	  prim(IVZ,k,j,ie+i) = local_vz;
 
-	   prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   prim(IVX,k,j,ie+i) = local_vx; 
-	   prim(IVY,k,j,ie+i) = local_vy;
-	   prim(IVZ,k,j,ie+i) = local_vz;
-	   // prim(IDN,k,j,ie+i+1) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   // prim(IVX,k,j,ie+i+1) = local_vx; 
-	   // prim(IVY,k,j,ie+i+1) = local_vy;
-	   // prim(IVZ,k,j,ie+i+1) = local_vz;
-	   if (NON_BAROTROPIC_EOS){
-	     prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
-	     //prim(IPR,k,j,ie+i+1) = prim(IDN,k,j,ie+i+1)*(temp_stream/temp_unit);
-	   }
-		   
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
+	    //prim(IPR,k,j,ie+i+1) = prim(IDN,k,j,ie+i+1)*(temp_stream/temp_unit);
+	  }	   
 	 
 	}else{//one-direction outflow
 	  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
@@ -1461,6 +1511,288 @@ void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 
 }
 
+void ReadOpacityTable(){
+    if (opacity_file!="None" && (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED)){
+      
+      //load combined opacity
+      combine_temp_grid.NewAthenaArray(n_tem);
+      combine_rho_grid.NewAthenaArray(n_rho);
+      combine_ross_table.NewAthenaArray(n_tem, n_rho);
+      combine_planck_table.NewAthenaArray(n_tem, n_rho);
+      
+      FILE *f_combineopacity;
+      
+      if ( (f_combineopacity=fopen(opacity_file.c_str(),"r"))==NULL )
+	{
+	  //printf("Open input file error combined opacity table %s\n", opacity_file.c_str());
+	  //return;
+	  std::stringstream msg;
+	  msg << "FATAL ERROR: Could not open opacity file "<< opacity_file.c_str() << std::endl;
+	  ATHENA_ERROR(msg);
+	}
+      
+      //first two lines are n_temp, n_rho
+      int buff;
+      for(int i=0; i<2; i++){
+	fscanf(f_combineopacity,"%d",&(buff));
+      }
+      
+      //load temperature grid
+      for(int i=0; i<n_tem; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
+      }
+      
+      //load density grid
+      for(int i=0; i<n_rho; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
+      }
+      
+      //load grey Rosseland mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+	}
+      }
+      
+      //load grey Planck mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+	}
+      }
+      
+      fclose(f_combineopacity);
+      
+      // printf("testing opacity table\n");
+      // Real kappa_p_test, kappa_r_test;
+      // combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
+      // printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
+    }
+
+}
+
+void get_uniform_table_opacity(const Real rho, const Real tgas,
+                               Real &kappa, Real &kappa_planck){
+    // STEP 1: fractional-index positions in log space.
+    Real logT   = log10(std::max(tgas, 1.0e-10));
+    Real logrho = log10(std::max(rho, 1.0e-32));
+
+    Real posT   = (logT   - log_tmin_u  ) * inv_dlogT_u;
+    Real posrho = (logrho - log_rhomin_u) * inv_dlogrho_u;
+
+    // STEP 2: base/upper indices and in-cell fractions, with edge clamping.
+    int nt1, nt2;
+    Real fT;
+    if (posT <= 0.0) {
+      nt1 = 0;
+      nt2 = 0;
+      fT = 0.0;
+    } else if (posT >= static_cast<Real>(n_tem - 1)) {
+      nt1 = n_tem - 1;
+      nt2 = n_tem - 1;
+      fT = 0.0;
+    } else {
+      nt1 = static_cast<int>(std::floor(posT));
+      nt2 = nt1 + 1;
+      fT  = posT - static_cast<Real>(nt1);
+    }
+
+    int nrho1, nrho2;
+    Real frho;
+    if (posrho <= 0.0) {
+      nrho1 = 0;
+      nrho2 = 0;
+      frho = 0.0;
+    } else if (posrho >= static_cast<Real>(n_rho - 1)) {
+      nrho1 = n_rho - 1;  nrho2 = n_rho - 1;  frho = 0.0;
+    } else {
+      nrho1 = static_cast<int>(std::floor(posrho));
+      nrho2 = nrho1 + 1;
+      frho  = posrho - static_cast<Real>(nrho1);
+    }
+
+    // STEP 3: read 4 corners in log(kappa).  Tables are indexed [n_tem, n_rho].
+    Real lkr_11 = uniform_ross_table(nt1, nrho1);
+    Real lkr_12 = uniform_ross_table(nt1, nrho2);
+    Real lkr_21 = uniform_ross_table(nt2, nrho1);
+    Real lkr_22 = uniform_ross_table(nt2, nrho2);
+
+    Real lkp_11 = uniform_planck_table(nt1, nrho1);
+    Real lkp_12 = uniform_planck_table(nt1, nrho2);
+    Real lkp_21 = uniform_planck_table(nt2, nrho1);
+    Real lkp_22 = uniform_planck_table(nt2, nrho2);
+
+    // STEP 4: above Tmax, apply Kramers T^-3.5 to both Rosseland and Planck.
+    Real log_tmax_u = log_tmin_u
+                    + static_cast<Real>(n_tem - 1) / inv_dlogT_u;
+    if (logT > log_tmax_u) {
+      Real logscale = -3.5 * (logT - log_tmax_u);
+      lkr_11 += logscale;
+      lkr_12 += logscale;
+      lkr_21 += logscale;
+      lkr_22 += logscale;
+
+      lkp_11 += logscale;
+      lkp_12 += logscale;
+      lkp_21 += logscale;
+      lkp_22 += logscale;
+    }
+
+    // STEP 5: bilinear in log space.
+    Real w11 = (1.0 - fT) * (1.0 - frho);
+    Real w12 = (1.0 - fT) * frho;
+    Real w21 = fT * (1.0 - frho);
+    Real w22 = fT * frho;
+
+    Real log_kappa_ross   = w11*lkr_11 + w12*lkr_12 + w21*lkr_21 + w22*lkr_22;
+    Real log_kappa_planck = w11*lkp_11 + w12*lkp_12 + w21*lkp_21 + w22*lkp_22;
+
+    kappa = std::pow(10.0, log_kappa_ross);
+    kappa_planck = std::pow(10.0, log_kappa_planck);
+
+    return;
+}
+
+//this largely is to match current athenak treatment of opacity
+void UniformTableOapcity(MeshBlock *pmb, AthenaArray<Real> &prim){
+
+  NRRadiation *prad = pmb->pnrrad;
+  int il = pmb->is; int jl = pmb->js; int kl = pmb->ks;
+  int iu = pmb->ie; int ju = pmb->je; int ku = pmb->ke;
+  il -= NGHOST;
+  iu += NGHOST;
+  if(ju > jl){
+    jl -= NGHOST;
+    ju += NGHOST;
+  }
+  if(ku > kl){
+    kl -= NGHOST;
+    ku += NGHOST;
+  }
+
+  Real T_ion    = 1.0e4; // above this H fully ionized, electron scattering on
+  Real T_recomb = 3.0e3; // below this H mostly neutral, pure absorption
+  Real rho_min_cgs = std::pow(10.0, log_rhomin_u);
+  Real tiny_kappa  = 1.0e-18; // numerical scatter floor below rho_min
+
+  for (int k=kl; k<=ku; ++k) {
+  for (int j=jl; j<=ju; ++j) {
+  for (int i=il; i<=iu; ++i) {
+
+    Real rho  = prim(IDN,k,j,i);
+    Real gast = std::max(prim(IPR,k,j,i)/rho, tfloor);
+    Real rho_cgs  = rho  * rho_unit;
+    Real gast_cgs = gast * temp_unit;
+
+    if (rho_cgs < rho_min_cgs){
+      Real kappa_ross_edge, kappa_planck_edge;
+      get_uniform_table_opacity(rho_min_cgs, gast_cgs,
+                                kappa_ross_edge, kappa_planck_edge);
+
+      // kappa_ross at rho_min is treated as pure absorption, not scatter.
+      Real k_abs_floor = kappa_floor;
+      if (kappa_floor_cap_planck == 1){
+        k_abs_floor = std::min(kappa_floor, kappa_ross_edge);
+      }
+
+      prad->sigma_s(k,j,i,0)  = rho * tiny_kappa  / kappa_unit;
+      prad->sigma_a(k,j,i,0)  = rho * k_abs_floor / kappa_unit;
+      prad->sigma_pe(k,j,i,0) = rho * k_abs_floor / kappa_unit;
+      prad->sigma_p(k,j,i,0)  = rho * k_abs_floor / kappa_unit;
+      continue;
+    }
+
+    Real kappa_ross_sct, kappa_planck;
+    get_uniform_table_opacity(rho_cgs, gast_cgs, kappa_ross_sct, kappa_planck);
+
+    Real kappa_ross = 0.0;
+    Real kappa_sct  = 0.0;
+    if (kappa_ross_sct < kappa_es){
+      if (gast_cgs < T_ion){
+        kappa_ross = kappa_ross_sct;
+        kappa_sct  = 0.0;
+      }else{
+        kappa_ross = 0.0;
+        kappa_sct  = std::max(kappa_ross_sct, 0.0);
+      }
+    }else{
+      if (gast_cgs > T_recomb){
+        kappa_ross = std::max(kappa_ross_sct - kappa_es, 0.0);
+        kappa_sct  = kappa_es;
+      }else{ 
+        kappa_ross = kappa_ross_sct;
+        kappa_sct  = 0.0;
+      }
+    }
+
+    prad->sigma_s(k,j,i,0)  = rho * kappa_sct / kappa_unit;
+    prad->sigma_a(k,j,i,0)  = rho * kappa_ross / kappa_unit;
+    prad->sigma_pe(k,j,i,0) = rho * kappa_planck / kappa_unit;
+    prad->sigma_p(k,j,i,0)  = rho * kappa_planck / kappa_unit;
+
+  }}}//end kji
+
+}
+
+
+void ReadUniformOpacityTable(){
+  if (opacity_file == "None" || !(NR_RADIATION_ENABLED || IM_RADIATION_ENABLED))
+    return;
+
+  uniform_temp_grid.NewAthenaArray(n_tem);
+  uniform_rho_grid.NewAthenaArray(n_rho);
+  uniform_ross_table.NewAthenaArray(n_tem, n_rho);
+  uniform_planck_table.NewAthenaArray(n_tem, n_rho);
+
+  FILE *f_uniform;
+  if ((f_uniform = fopen(opacity_file.c_str(), "r")) == NULL){
+    std::stringstream msg;
+    msg << "FATAL ERROR: Could not open uniform opacity file "
+        << opacity_file.c_str() << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  // header: n_tem, n_rho (consumed; we trust the input-file values)
+  int buff;
+  for (int i=0; i<2; ++i){
+    fscanf(f_uniform, "%d", &buff);
+  }
+  for (int i=0; i<n_tem; ++i){
+    fscanf(f_uniform, "%lf", &(uniform_temp_grid(i)));
+  }
+  for (int i=0; i<n_rho; ++i){
+    fscanf(f_uniform, "%lf", &(uniform_rho_grid(i)));
+  }
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      fscanf(f_uniform, "%lf", &(uniform_ross_table(j, i)));
+    }
+  }
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      fscanf(f_uniform, "%lf", &(uniform_planck_table(j, i)));
+    }
+  }
+  fclose(f_uniform);
+
+  // log-uniform grid parameters once.
+  log_tmin_u    = log10(uniform_temp_grid(0));
+  log_rhomin_u  = log10(uniform_rho_grid(0));
+  inv_dlogT_u   = static_cast<Real>(n_tem - 1)
+                / (log10(uniform_temp_grid(n_tem - 1)) - log_tmin_u);
+  inv_dlogrho_u = static_cast<Real>(n_rho - 1)
+                / (log10(uniform_rho_grid(n_rho - 1)) - log_rhomin_u);
+
+  const Real tiny_kappa = 1.0e-24;
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      uniform_ross_table(j, i)   = log10(std::max(uniform_ross_table(j, i),
+                                                  tiny_kappa));
+      uniform_planck_table(j, i) = log10(std::max(uniform_planck_table(j, i),
+                                                  tiny_kappa));
+    }
+  }
+}
 
 
 Real massflux_AInj_x1(MeshBlock *pmb, int iout){

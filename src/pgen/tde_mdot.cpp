@@ -40,11 +40,24 @@ static Real dfloor, pfloor;
 static Real user_dt;
 
 //Injection point
-static Real rad_inject, phi_inject, local_dens, local_vr, local_vphi, local_press;
+static Real rad_inject, phi_inject, theta_inject;
+static Real local_dens, local_press;
+static Real local_vr, local_vtheta, local_vphi;
 static Real f_dr, f_dth, f_dph;
+static Real temp_stream;
+static Real h_stream;
+//stream injection boundary
+//static Real r0, inj_thresh, b0;
+//static Real rad_inject2; //rad_inject,  phi_inject;
+static Real inj_thresh;
+int rho1_flag;
+int uniform_stream;
+int user_fallback_rate;
+Real mdot_norm;
+int inj_print_flag;
+
 //Initialize domain
 static Real rho_init, press_init;
-static Real temp_stream;
 
 //opacity tables
 static AthenaArray<Real> opacitytable;
@@ -55,27 +68,43 @@ static AthenaArray<Real> logttable_planck;
 static AthenaArray<Real> logrhottable_planck;
 
 //new combined opacity table
+static int n_rho;
+static int n_tem;
+std::string  opacity_file;
+std::string  opacity_type;
 static AthenaArray<Real> combine_temp_grid;
 static AthenaArray<Real> combine_rho_grid;
 static AthenaArray<Real> combine_ross_table;
 static AthenaArray<Real> combine_planck_table;
-static int n_rho = 140;
-static int n_tem = 70;
+
 void combineopacity(const Real rho, const Real tgas, Real &kappa_ross, Real &kappa_planck);
 void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim);
+void ReadOpacityTable();
 int replace_low_dens_ff;
-Real rho_cut_ff; 
+Real rho_cut_ff;
+
+//opacity table that is uniform in temp and rho 
+static AthenaArray<Real> uniform_temp_grid; //cgs
+static AthenaArray<Real> uniform_rho_grid; //cgs
+static AthenaArray<Real> uniform_ross_table; //log(kappa_ross_sct)
+static AthenaArray<Real> uniform_planck_table; //log(kappa_planck)
+static Real log_tmin_u, log_rhomin_u;
+static Real inv_dlogT_u, inv_dlogrho_u;
+//kappa floor, cgs 
+static Real kappa_floor;
+//flag to cap kappa_floor by kappa_ross evaluated at the table's rho_min
+static int kappa_floor_cap_planck;
+
+void get_uniform_table_opacity(const Real rho, const Real tgas,
+                               Real &kappa, Real &kappa_planck);
+void UniformTableOapcity(MeshBlock *pmb, AthenaArray<Real> &prim);
+void ReadUniformOpacityTable();
 
 //refinement
 static Real rad_thresh, ph_thresh, th_thresh;
 static int blocksizex1_base, blocksizex2_base, blocksizex3_base;
 static Real delta_theta_base;
 static Real rad_coarse_thresh, ph_coarse_thresh, th_coarse_thresh;
-
-//stream injection boundary
-static Real r0, inj_thresh, b0;
-static Real rad_inject2; //rad_inject,  phi_inject;
-int rho1_flag;
 
 // User-defined boundary conditions for disk simulations
 void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
@@ -126,7 +155,6 @@ Real RadTimeStep(MeshBlock *pmb);
 
 //time dependent mdot
 static int mdot_table_ng; //number of segment groups from spline fitting
-static Real mdot_rho1; //when setting rho=1, the total mdot through phi and theta
 static AthenaArray<Real> mdot_table;
 static AthenaArray<Real> mdot_time_table;
 Real GetMdot(MeshBlock *pmb, Real tnow);
@@ -152,8 +180,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   blocksizex1_base = pin->GetOrAddInteger("meshblock", "nx1", 1);
   blocksizex2_base = pin->GetOrAddInteger("meshblock", "nx2", 1);
   blocksizex3_base = pin->GetOrAddInteger("meshblock", "nx3", 1);
-  int theta_max = pin->GetReal("mesh","x2max");
-  int theta_min = pin->GetReal("mesh","x2min");
+  Real theta_max = pin->GetReal("mesh","x2max");
+  Real theta_min = pin->GetReal("mesh","x2min");
   int theta_base = pin->GetInteger("mesh","nx2");
   delta_theta_base = (theta_max - theta_min)/theta_base * blocksizex2_base;
 
@@ -179,8 +207,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   local_dens = pin->GetReal("problem", "local_dens");
   local_vr = pin->GetReal("problem", "local_vr");
   local_vphi = pin->GetReal("problem", "local_vphi");
+  local_vtheta = pin->GetOrAddReal("problem", "local_vtheta", 0.0);
   //local_press = pin->GetReal("problem", "local_press");
   rho1_flag = pin->GetOrAddInteger("problem", "rho1_flag", 0);
+  uniform_stream = pin->GetOrAddInteger("problem", "uniform_stream", 1);
+  user_fallback_rate = pin->GetOrAddInteger("problem", "user_fallback_rate", 0);
+  mdot_norm = pin->GetOrAddReal("problem", "mdot_norm", 1.0);
+  inj_print_flag = pin->GetOrAddInteger("problem", "inj_print_flag", 0);
 
   f_dr = pin->GetOrAddInteger("problem", "f_dr", 1);  
   f_dth = pin->GetOrAddInteger("problem", "f_dth", 1);
@@ -194,26 +227,35 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   th_coarse_thresh = pin->GetOrAddReal("problem", "th_coarse_thresh", 0.01);
 
   //stream injection boundary
-  b0 = pin->GetOrAddReal("problem", "b0", 0.1);
-  r0 = pin->GetOrAddReal("problem", "r0", 7.53);
+  //b0 = pin->GetOrAddReal("problem", "b0", 0.1);
+  //r0 = pin->GetOrAddReal("problem", "r0", 7.53);
+  //rad_inject2 = pin->GetOrAddReal("problem", "rad_inject2", 407.886);
+  
   inj_thresh = pin->GetOrAddReal("problem", "inj_thresh", 7.53);
-  //rad_inject = pin->GetOrAddReal("problem", "rad_inject", 400.0);
-  rad_inject2 = pin->GetOrAddReal("problem", "rad_inject2", 407.886);
-  //phi_inject = pin->GetOrAddReal("problem", "phi_inj", 3.14);
+  rad_inject = pin->GetOrAddReal("problem", "rad_inject", 400.0);
+  phi_inject = pin->GetOrAddReal("problem", "phi_inj", 3.14);
+  theta_inject = pin->GetOrAddReal("problem", "theta_inject", PI/2.0);
 
   //Initialize domain
   rho_init = pin->GetReal("problem", "rho_init");
   press_init = pin->GetReal("problem", "press_init");
-  temp_stream = pin->GetReal("problem", "temp_stream");  
+  temp_stream = pin->GetReal("problem", "temp_stream");
+  h_stream = pin->GetReal("problem", "h_stream");
   local_press = local_dens*temp_stream/temp_unit;
 
   //kappa_unit: cm^2/g
   kappa_unit = 1.0/(rho_unit*l_unit);
   kappa_es_code = kappa_es/kappa_unit;
+  opacity_file = pin->GetOrAddString("problem", "opacity_file", "None");
+  opacity_type = pin->GetOrAddString("problem", "opacity_type", "table");
+  n_rho = pin->GetOrAddInteger("problem" ,"n_rho", 70);
+  n_tem = pin->GetOrAddInteger("problem" ,"n_tem", 140);
+  // grey uniform table controls
+  kappa_floor = pin->GetOrAddReal("problem", "kappa_floor", 1.0e-6);
+  kappa_floor_cap_planck = pin->GetOrAddInteger("problem", "kappa_floor_cap_planck", 0);
 
   //mdot table
   mdot_table_ng = pin->GetInteger("problem", "mdot_table_ng");
-  mdot_rho1 = pin->GetReal("problem", "mdot_rho1");
 
   // enroll user-defined boundary condition
   if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
@@ -253,8 +295,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     fscanf(fmdot_table,"%lf",&(mdot_table(i)));
   }
 
-  //printf("testing spline txt, mdot_table_ng(7):%g, mdot_coef:%g %g %g %g\n", mdot_x_breaks(7), mdot_coef(7, 0), mdot_coef(7, 1), mdot_coef(7, 2), mdot_coef(7, 3));
-
   if (NR_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
@@ -264,143 +304,68 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x1, RadOuterX1);
     }
 
-    // //opacity tables
-    // opacitytable.NewAthenaArray(212,46);
-    // planckopacity.NewAthenaArray(138,37);
-    // logttable.NewAthenaArray(212);
-    // logrhottable.NewAthenaArray(46);
-    // logttable_planck.NewAthenaArray(138);
-    // logrhottable_planck.NewAthenaArray(37);
+    // //load combined opacity
+    // combine_temp_grid.NewAthenaArray(n_tem);
+    // combine_rho_grid.NewAthenaArray(n_rho);
+    // combine_ross_table.NewAthenaArray(n_tem, n_rho);
+    // combine_planck_table.NewAthenaArray(n_tem, n_rho);
+
+    // FILE *f_combineopacity;
     
-    // // read in the opacity table
-    // FILE *fkappa, *flogt, *flogrhot, *fplanck, *flogt_planck, *flogrhot_planck;
-      
-    // if ( (fkappa=fopen("./aveopacity_combined.txt","r"))==NULL )
+    // if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
     // {
-    //   printf("Open input file error aveopacity_combined");
+    //   printf("Open input file error combined opacity table");
     //   return;
     // }
-
-    // if ( (fplanck=fopen("./PlanckOpacity.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error PlanckOpacity");
-    //   return;
+    // //first two lines are n_temp, n_rho
+    // int buff;
+    // for(int i=0; i<2; i++){
+    //   fscanf(f_combineopacity,"%d",&(buff));
     // }
 
-    // if ( (flogt=fopen("./logT.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error logT");
-    //   return;
+    // //load temperature grid
+    // for(int i=0; i<n_tem; ++i){
+    //   fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
     // }
 
-    // if ( (flogrhot=fopen("./logRhoT.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error logRhoT");
-    //   return;
+    // //load density grid
+    // for(int i=0; i<n_rho; ++i){
+    //   fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
     // }
 
-    // if ( (flogt_planck=fopen("./logT_planck.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error logT_planck");
-    //   return;
-    // }
-
-    // if ( (flogrhot_planck=fopen("./logRhoT_planck.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error logRhoT_planck");
-    //   return;
-    // }
-
-    // for(int j=0; j<212; j++){
-    //   for(int i=0; i<46; i++){
-    //       fscanf(fkappa,"%lf",&(opacitytable(j,i)));
+    // //load grey Rosseland mean opacity
+    // for (int j=0; j<n_tem; ++j){
+    //   for (int i=0; i<n_rho; ++i){
+    // 	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
     //   }
     // }
 
-    // for(int j=0; j<138; j++){
-    //   for(int i=0; i<37; i++){
-    //       fscanf(fplanck,"%lf",&(planckopacity(j,i)));
+    // //load grey Planck mean opacity
+    // for (int j=0; j<n_tem; ++j){
+    //   for (int i=0; i<n_rho; ++i){
+    // 	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
     //   }
-    //  }
-
-
-    // for(int i=0; i<46; i++){
-    //   fscanf(flogrhot,"%lf",&(logrhottable(i)));
     // }
 
-    // for(int i=0; i<212; i++){
-    //   fscanf(flogt,"%lf",&(logttable(i)));
-    // }
-
-    // for(int i=0; i<37; i++){
-    //   fscanf(flogrhot_planck,"%lf",&(logrhottable_planck(i)));
-    // }
-
-    // for(int i=0; i<138; i++){
-    //   fscanf(flogt_planck,"%lf",&(logttable_planck(i)));
-    // }
-
-    // fclose(fkappa);
-    // fclose(flogt);
-    // fclose(flogrhot);
-    // fclose(fplanck);
-    // fclose(flogt_planck);
-    // fclose(flogrhot_planck);
-
-
-    //load combined opacity
-    combine_temp_grid.NewAthenaArray(n_tem);
-    combine_rho_grid.NewAthenaArray(n_rho);
-    combine_ross_table.NewAthenaArray(n_tem, n_rho);
-    combine_planck_table.NewAthenaArray(n_tem, n_rho);
-
-    FILE *f_combineopacity;
-    
-    if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
-    {
-      printf("Open input file error combined opacity table");
-      return;
-    }
-    //first two lines are n_temp, n_rho
-    int buff;
-    for(int i=0; i<2; i++){
-      fscanf(f_combineopacity,"%d",&(buff));
-    }
-
-    //load temperature grid
-    for(int i=0; i<n_tem; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
-    }
-
-    //load density grid
-    for(int i=0; i<n_rho; ++i){
-      fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
-    }
-
-    //load grey Rosseland mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
-      }
-    }
-
-    //load grey Planck mean opacity
-    for (int j=0; j<n_tem; ++j){
-      for (int i=0; i<n_rho; ++i){
-	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
-      }
-    }
-
-    fclose(f_combineopacity);
+    // fclose(f_combineopacity);
 
     //printf("testing frequency table\n");
     //printf("grey planck:%g, ross:%g\n", combine_planck_table(30, 50), combine_ross_table(30, 50));
     //Real kappa_p_test, kappa_r_test;
     //combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
     //printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
-    
  
   }
+
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
+    if (opacity_file != "None"){
+      if (opacity_type == "uniform_table" && opacity_file != "None"){
+        ReadUniformOpacityTable();
+      } else {
+        ReadOpacityTable();
+      }
+    }//load opacity table
+  }//NR_RADIATION||IM_RADIATION_ENABLED
   
 
   EnrollUserExplicitSourceFunction(GeneralNewtonianPotential);//(PointMassPotential);
@@ -482,7 +447,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
        //injection point
        if (fabs(rad-rad_inject) <= rad_coarse_thresh){
        	 if (fabs(phi_coord-phi_inject) <= ph_coarse_thresh){// if within L1 point
-       	   if (fabs(theta_coord - PI/2.0)<= th_coarse_thresh){
+       	   if (fabs(theta_coord - theta_inject)<= th_coarse_thresh){
        	     //printf("coarse\n");
 		//printf("r:%g, ph:%g, th:%g, dis_r:%g, dis_phi:%g, dis_th:%g, i:%d, gid:%d, dr:%g, dph:%g, dth:%g\n", rad, phi_coord, theta_coord, fabs(rad-rad_inject), fabs(phi_coord - phi_inject), fabs(theta_coord - PI/2.0), i, gid, pcoord->dx1f(i), pcoord->dx3f(k), pcoord->dx2f(j));
        	     iuser_meshblock_data[0](0) = 1;
@@ -490,75 +455,10 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
        	 }
        }//end injection point
 
-       // Real phi_now = pcoord->x3v(k);
-       // Real th_now = pcoord->x2v(j);
-       // Real r_now = pcoord->x1v(i);
-       // Real r_l = pcoord->x1v(is);
-       // Real r_u = pcoord->x1v(ie);
-
-       // Real phi_fit = orbit_fit_phi(r_now);
-       // Real dis_phi = fabs(phi_now - phi_fit);
-       // Real dis_th = fabs(th_now - PI/2.0);
-
-       // //the positive and negative distantce
-       // Real dis_phi_p = 0.0;
-       // if (phi_now > phi_fit){
-       // 	 dis_phi_p = fabs(phi_now - phi_fit);
-       // }
-       // Real dis_phi_m = 0.0;
-       // if (phi_now <= phi_fit){
-       // 	 dis_phi_m = fabs(phi_now - phi_fit);
-       // }
-
-
-       // 	//find the max dr/dphi in this meshblock to r
-       // 	if (dphi > max_dphi){
-       // 	  max_dphi = dphi;
-       // 	}
-       // 	if (dth > max_dth){
-       // 	  max_dth = dth;
-       // 	}
-
-       // 	//find the max dr/dth in this meshblock
-       // 	if (dis_phi > max_dis_phi){
-       // 	  max_dis_phi = dis_phi;
-       // 	}
-       // 	if (dis_phi_m > max_dis_phi_m){
-       // 	  max_dis_phi_m = dis_phi_m;
-       // 	}
-       // 	if (dis_phi_p > max_dis_phi_p){
-       // 	  max_dis_phi_p = dis_phi_p;
-       // 	}
-       // 	if (dis_th > max_dis_th){
-       // 	  max_dis_th = dis_th;
-       // 	}
-
      }//k
    }//j
   }//i
 
-  // //level 3
-  // if (max_dis_phi <= 0.68 && r_u<50.0 && r_l>22.0 && max_dis_th<0.54){ //inner part of stream
-  //   iuser_meshblock_data[0](2) = 1;
-  //   //printf("refine 1, r_u:%g, r_l:%g, max_dis_phi:%g\n", r_u, r_l, max_dis_phi);
-  // }else if (max_dis_phi <= 1.2 && r_u<22.0 && r_l>11.0 && max_dis_th<0.54){
-  //   iuser_meshblock_data[0](2) = 1;
-  //   printf("refine 2, r_u:%g, r_l:%g, max_dis_phi:%g\n", r_u, r_l, max_dis_phi);
-  // }else if (r_u<14.0 && r_l>2.0 && max_dis_th<0.42){//outer part of stream
-  //   iuser_meshblock_data[0](2) = 1;
-  // }
-
- //level 3, different upper phi and lower phi to cover collision region
-  // if (max_dis_phi_p <= 0.68 && max_dis_phi_p > 0.0 && r_u<50.0 && r_l>11.0 && max_dis_th<0.54){ //inner part of stream
-  //   iuser_meshblock_data[0](2) = 1;
-  // }else if (max_dis_phi_m <= 0.68 && max_dis_phi_m >0.0 && r_u<50.0 && r_l>22.0 && max_dis_th<0.54){
-  //   iuser_meshblock_data[0](2) = 1;
-  // }else if (max_dis_phi_m <= 1.4 && max_dis_phi_m >0.0 && r_u<22.0 && r_l>11.0 && max_dis_th<0.54){
-  //   iuser_meshblock_data[0](2) = 1;
-  // }else if (r_u<14.0 && r_l>2.0 && max_dis_th<0.42){//outer part of stream
-  //   iuser_meshblock_data[0](2) = 1;
-  // }
-  
   AllocateUserOutputVariables(9);
   SetUserOutputVariableName(0, "GravSrc_IM1");
   SetUserOutputVariableName(1, "GravSrc_IM2");
@@ -571,7 +471,13 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
   SetUserOutputVariableName(8, "RadSrc_ein_new");
 
   if (NR_RADIATION_ENABLED){
-    pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(opalopacity);
+    if (opacity_type == "uniform_table" && opacity_file != "None"){
+      pnrrad->EnrollOpacityFunction(UniformTableOapcity);
+    } else {
+      pnrrad->EnrollOpacityFunction(GetCombineOpacity);//(opalopacity);
+    }
+    if (Globals::my_rank==0)
+      std::cout<<"Using Opacity Type:"<<opacity_type<<std::endl;
   }
 
   return;
@@ -720,12 +626,7 @@ void Mesh::UserWorkInLoop(){
     if (pmb->iuser_meshblock_data[0](0) !=0 ){
     //get current loacla dens
     Real t_current = pmb->pmy_mesh->time;
-    Real local_dens_now_ = GetMdot(pmb, t_current);
 
-    //hard-code local density to 1.0 in runs to calculate mass flux normalization.
-    if (rho1_flag==1){
-      local_dens_now_ = 1.0;
-    }
     for(int k=ks; k<=ke; k++){
       for(int i=is; i<=ie; i++){
 	for(int j=js; j<=je; j++){
@@ -753,32 +654,6 @@ void Mesh::UserWorkInLoop(){
 	  AthenaArray<Real> &x1flux = phydro->flux[X1DIR];
 	  AthenaArray<Real> &x2flux = phydro->flux[X2DIR];
 	  AthenaArray<Real> &x3flux = phydro->flux[X3DIR];
-
-	  /* change to boundary injection */
-	  // if (fabs(rad-rad_inject) <= rad_thresh){
-	  //   if (fabs(phi_coord - phi_inject) <= ph_thresh){
-	  //     if (fabs(theta_coord - PI/2.0)<= th_thresh){
-	  // 	pmb->iuser_meshblock_data[0](1) = 1;
-	  //       printf("r:%g, ph:%g, th:%g, dis_r:%g, dis_phi:%g, dis_th:%g, i:%d, gid:%d, dr:%g, dph:%g, dth:%g\n", rad, phi_coord, theta_coord, fabs(rad-rad_inject), fabs(phi_coord - phi_inject), fabs(theta_coord - PI/2.0), i, pmb->gid, pmb->pcoord->dx1f(i), pmb->pcoord->dx3f(k), pmb->pcoord->dx2f(j));
-	  // 	pmb->phydro->u(IDN,k,j,i) += local_dens_now_*pmb->pmy_mesh->dt;
-	  // 	pmb->phydro->u(IM1,k,j,i) += local_dens_now_*local_vr*pmb->pmy_mesh->dt;
-	  // 	pmb->phydro->u(IM3,k,j,i) += local_dens_now_*local_vphi*pmb->pmy_mesh->dt;
-	  // 	if (NON_BAROTROPIC_EOS){
-	  // 	  Real ke_new = 0.5*(1.0/pmb->phydro->u(IDN,k,j,i))*(SQR(pmb->phydro->u(IM1,k,j,i)) + SQR(pmb->phydro->u(IM2,k,j,i)) + SQR(pmb->phydro->u(IM3,k,j,i)));
-	  // 	  Real tgas_stream = temp_stream/temp_unit;
-	  // 	  Real etot_new = ke_new + tgas_stream * phydro->w(IDN,k,j,i)/(pmb->peos->GetGamma()-1.0);
-	  // 	  phydro->u(IEN,k,j,i) = etot_new;
-
-	  // 	}
-	  //       //store the injection area and flux
-  	  // 	pmb->ruser_meshblock_data[1](0,k,j,i) = pcoord->GetFace1Area(k,j,i);
-  	  // 	pmb->ruser_meshblock_data[1](1,k,j,i) = x1flux(IDN,k,j,i) * pcoord->GetFace1Area(k,j,i) - x1flux(IDN,k,j,i+1) * pcoord->GetFace1Area(k,j,i+1); 
-  	  // 	pmb->ruser_meshblock_data[1](2,k,j,i) = pcoord->GetFace3Area(k,j,i);
-  	  // 	pmb->ruser_meshblock_data[1](3,k,j,i) = x3flux(IDN,k,j,i) * pcoord->GetFace3Area(k,j,i) - x3flux(IDN,k+1,j,i) * pcoord->GetFace3Area(k+1,j,i); 
-		
-	  //     }//in radius range
-	  //   }//in phi range
-	  // }//in thetarange
 
 
 	}//j
@@ -829,40 +704,46 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
 
-	if (NR_RADIATION_ENABLED){
+	// if (NR_RADIATION_ENABLED){
 
-	  Real rho = phydro->w(IDN,k,j,i);
-	  Real temp = phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
+	//   Real rho = phydro->w(IDN,k,j,i);
+	//   Real temp = phydro->w(IPR,k,j,i)/phydro->w(IDN,k,j,i);
 
-	  Real rho_cgs = rho*rho_unit;
-	  Real temp_cgs = temp*temp_unit;
+	//   Real rho_cgs = rho*rho_unit;
+	//   Real temp_cgs = temp*temp_unit;
 	
-	  Real kappaa = 0.0;
-	  Real kappa_s, kappa_ross, kappa_planck;
-	  combineopacity(rho_cgs, temp_cgs, kappa_ross, kappa_planck);
-	  Real t_ion = 1.0e4;
+	//   Real kappaa = 0.0;
+	//   Real kappa_s, kappa_ross, kappa_planck;
+	  
+	//   if (opacity_type == "uniform_table" && opacity_file != "None"){
+	//     get_unitofrm_table_opacity(rho_cgs, temp_cgs, kappa_ross, kappa_planck);
+	//   }else{
+	//     combineopacity(rho_cgs, temp_cgs, kappa_ross, kappa_planck);
+	//   }
+	  
+	//   Real t_ion = 1.0e4;
 	
-	  if(kappa_ross < kappa_es){
-	    if(temp < t_ion/temp_unit){
-	      kappaa = kappa_ross;
-	      kappa_s = 0.0;
-	    }else{
-	      kappaa = 0.0;
-	      kappa_s = kappa_ross;
-	    }
-	  }else{
-	    kappaa = kappa_ross - kappa_es;
-	    kappa_s = kappa_es;
-	  }
+	//   if(kappa_ross < kappa_es){
+	//     if(temp < t_ion/temp_unit){
+	//       kappaa = kappa_ross;
+	//       kappa_s = 0.0;
+	//     }else{
+	//       kappaa = 0.0;
+	//       kappa_s = kappa_ross;
+	//     }
+	//   }else{
+	//     kappaa = kappa_ross - kappa_es;
+	//     kappa_s = kappa_es;
+	//   }
 	
-	  //one frequency
-	  pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
-	  pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //rosseland mean
-	  pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
-	  pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
+	//   //one frequency
+	//   pnrrad->sigma_s(k,j,i,0) = kappa_s * rho * rho_unit * l_unit; //scatter
+	//   pnrrad->sigma_a(k,j,i,0) = kappaa * rho * rho_unit * l_unit; //rosseland mean
+	//   pnrrad->sigma_pe(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit; //planck mean
+	//   pnrrad->sigma_p(k,j,i,0) = kappa_planck * rho * rho_unit * l_unit;//planck mean
 	
      
-	}//end rad
+	// }//end rad
 
         if (NON_BAROTROPIC_EOS) {
           phydro->u(IEN,k,j,i) = press_init/(gamma_gas - 1.0);
@@ -935,9 +816,8 @@ Real GetMdot(MeshBlock *pmb, Real tnow){
 
   Real mdot_cgs = mdot_interp * (msun/year);
   Real mdot_code = mdot_cgs / mdot_unit;
-  Real local_dens_now = mdot_code / mdot_rho1;
+  Real local_dens_now = mdot_code;
   //printf("t now:%g, t days:%g, mdot now:%g, local_dens:%g, mdot_code:%g, mdot_rho1:%g\n", tnow, t_days, mdot_interp, local_dens_now, mdot_code, mdot_rho1);
-
   
   return local_dens_now;
   
@@ -991,7 +871,7 @@ void GeneralNewtonianPotential(MeshBlock *pmb, const Real time, const Real dt, c
 	Real ie_now = etot_now - ke_now;
 
 	//check total energy
-	Real etot_update = cons(IEN,k,j,i) + dt * acc1 * rho * prim(IVX,k,j,i) +  acc2 * rho * prim(IVY,k,j,i) + dt * acc3 * rho * prim(IVZ,k,j,i);
+	Real etot_update = cons(IEN,k,j,i) + dt * acc1 * rho * prim(IVX,k,j,i) +  dt * acc2 * rho * prim(IVY,k,j,i) + dt * acc3 * rho * prim(IVZ,k,j,i);
 	Real im1_update = cons(IM1,k,j,i) + dt * rho * acc1;
 	Real im2_update = cons(IM2,k,j,i) + dt * rho * acc2;
 	Real im3_update = cons(IM3,k,j,i) + dt * rho * acc3;
@@ -1139,50 +1019,19 @@ void PointMassPotential(MeshBlock *pmb, const Real time, const Real dt,const Ath
 
 void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt, int is, int ie, int js, int je, int ks, int ke, int ngh){
 
-  Real local_dens = 0.1;
-  Real local_vr = 0.0;
-  Real local_vphi = 0.036;
-  Real local_press = 1.0e-4;
-
   for (int k=ks; k<=ke; ++k) {//phi
     Real phi_coord = pco->x3v(k);
     for (int j=js; j<=je; ++j) {//theta
       Real theta_coord = pco->x2v(j);
       for (int i=1; i<=(NGHOST); ++i) {//R
-	//printf("phi: %g, theta: %g\n", phi_coord, theta_coord);
-	//if (phi_coord<=0.05 || (2*PI-phi_coord<=0.05)){// if within L1 point
-	//  if ((theta_coord <= PI/2.+0.05) && (theta_coord >= PI/2.-0.05)){
-	    //printf("phi: %g, theta: %g, k: %d, j:%d, i:%d\n", phi_coord, theta_coord,k,j,i);
 
-	//  prim(IDN,k,j,ie+i) = local_dens;
-	//  prim(IVX,k,j,ie+i) = local_vr;
-	//  prim(IVY,k,j,ie+i) = 0.0;
-	//  prim(IVZ,k,j,ie+i) = local_vphi; 
-	  
-	//  if (NON_BAROTROPIC_EOS) {
-	//    prim(IPR,k,j,ie+i) = local_press;
-	//  }
-	//}else{
-	//  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
-	//  prim(IVX,k,j,ie+i) = std::max(0.0, prim(IVX,k,j,ie));
-	//  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);//pco->x1v(ie+i)*sqrt(GM1/pow(pco->x1v(ie+i),3));
-	//  prim(IVY,k,j,ie+i) = prim(IVY,k,j,ie);
-	//  if (NON_BAROTROPIC_EOS){
-	//    prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie);
-	//  }
-
-	//}
-	//}else{//one-direction outflow
 	  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
 	  prim(IVX,k,j,ie+i) = std::max(0.0, prim(IVX,k,j,ie));
-	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);//pco->x1v(ie+i)*sqrt(GM1/pow(pco->x1v(ie+i),3));
+	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);
 	  prim(IVY,k,j,ie+i) = prim(IVY,k,j,ie);
 	  if (NON_BAROTROPIC_EOS){
 	    prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie);
 	  }
-	  //}
-	
-
 
       }//end R
     }//end theta
@@ -1193,104 +1042,85 @@ void HydroOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,Face
 void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b, Real time, Real dt,int is, int ie, int js, int je, int ks, int ke, int ngh){
 
   Real t_current = pmb->pmy_mesh->time;
-  Real local_dens_now_;
-  if (rho1_flag==1){
-    local_dens_now_ = 1.0; //for rho1 run
-  }else{
-    local_dens_now_ = GetMdot(pmb, t_current);
+  //Real local_dens_now_ = local_dens / mdot_norm;
+  Real mdot_now_code = 1.0;
+  
+  if (user_fallback_rate){
+    //local_dens_now_ = GetMdot(pmb, t_current);
+    mdot_now_code = GetMdot(pmb, t_current);
   }
+  Real local_dens_now_ = local_dens * mdot_now_code / mdot_norm;
 
-  Real rinj_thresh=inj_thresh;//2x2x3 (r,th,phi) ghost cells for a wider stream than it is thick
+  //Real rinj_thresh=inj_thresh;
   for (int k=ks; k<=ke; ++k) {//phi
     Real ph_coord = pco->x3v(k);
     for (int j=js; j<=je; ++j) {//theta
       Real th_coord = pco->x2v(j);
-      for (int i=1; i<=NGHOST; ++i) {//R
+      for (int i=1; i<=ngh; ++i) {//R
 
 	//try constraining distance to injection point first
 	//only inject at theta, phi direction cell for radial boundary
- 
-	Real r_inj; 
-	Real rad; //used to select injection cells only, r_inj and rad are very close (1e-2-1e-1) for i=1 and exactly the same for i=2
-	// //XS: my understanding is because boundary cell size can be very different for dx1f(ie+1) and dx1f(ie+2), so here we're setting different r_inj for two ghost cells
-	// if (i==1) {
-	//   r_inj = rad_inject; //this is very close to rad
-	//   //r_inj=pco->x1f(ie+2);
-	//   rad=pco->x1f(ie+2);
-	// } else {
-	//   r_inj = rad_inject2;
-	//   //r_inj=pco->x1f(ie+3);
-	//   rad=pco->x1f(ie+3);
-	// }
 
-	//XS: alternatively, only find closest one cell. If it's i=1, then inject at both (k,j,ie+i) and (k,j,ie+i+1); otherwise, if i=2, inject at (k,j,ie+i) nad (k,j,ie+i-1)
-	//XS: swith to distance selected in future GR calculation, this is confusing
-	r_inj = rad_inject; 
-	rad=pco->x1f(ie+2);
-
-	
         Real r_coord = pco->x1v(ie+i); //ghost zone radius for density
 	//get currtent Cartesian coordinates
-	Real x_now = rad * cos(ph_coord) * sin(th_coord);
-	Real y_now = rad * sin(ph_coord) * sin(th_coord);
-	Real z_now = rad * cos(th_coord);
-	//get injection cell coordinates
+	Real x_now = r_coord * cos(ph_coord) * sin(th_coord);
+	Real y_now = r_coord * sin(ph_coord) * sin(th_coord);
+	Real z_now = r_coord * cos(th_coord);
 	
+	//get injection cell coordinates
+	Real r_inj = rad_inject;
 	Real ph_inj = phi_inject;
-	Real th_inj = PI/2.0;
+	Real th_inj = theta_inject;
 	//get injection cell Cartesian coordinates
 	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
 	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
 	Real z_inj = r_inj * cos(th_inj);
 
-	//Then what to do?
 	//we can try saying that if the distance to injection point is within a range rinj_thresh
 	Real d_inj = sqrt((x_now - x_inj)*(x_now - x_inj)+
 			  (y_now - y_inj)*(y_now - y_inj)+
 			  (z_now - z_inj)*(z_now - z_inj));
 
 	//printf("in boundary, d_inj:%g, rinj_thresh:%g\n", d_inj, rinj_thresh);
-	if (d_inj < rinj_thresh){ //injection cells
+	if (d_inj < inj_thresh){ //injection cells
           
-          Real dist = sqrt(r_coord*r_coord + r_inj*r_inj - 2.0*r_coord*r_inj*(sin(th_coord)*sin(th_inj)*cos(ph_coord-ph_inj) + 
-									    cos(th_coord)*cos(th_inj))); //real distance from injection point
-                                                                                                        // (fc) to injection cell (vc)
+          Real dist = sqrt(r_coord * r_coord + r_inj * r_inj
+			   - 2.0 * r_coord * r_inj * (sin(th_coord) * sin(th_inj) * cos(ph_coord-ph_inj)
+			   + cos(th_coord)*cos(th_inj))); //spherical distance from injection point
 
-	  printf("boundary: r:%g, phi:%g, theta:%g, x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", r_coord, ph_coord, th_coord, x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
-	  //HERE CHOOSE rinj_thresh THAT ONLY ALLOW SINGLE INDEX OF i 
-	 //printf("boundary, gid:%d, k:%d, j:%d, i:%d, x1v:%g, x1v_l:%g, x1v_r:%g, x2v:%g, x3v:%g, d_inj:%g\n", pmb->gid, k, j, i, pmb->pcoord->x1v(ie+i), pmb->pcoord->x1v(ie+i-1), pmb->pcoord->x1v(ie+i+1), pmb->pcoord->x2v(j), pmb->pcoord->x3v(k), d_inj);
+	  if (inj_print_flag==1){
+	    printf("boundary: r:%g, phi:%g, theta:%g, x:%g, y:%g, z:%g, d_inj:%g, x_inj:%g, y_inj:%g, z_inj:%g\n", r_coord, ph_coord, th_coord, x_now, y_now, z_now, d_inj, x_inj, y_inj, z_inj);
+	  }
 
-	  //similar thing here
-	 if (i==1){
-	   prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   prim(IVX,k,j,ie+i) = local_vr; 
-	   prim(IVY,k,j,ie+i) = 0.0;
-	   prim(IVZ,k,j,ie+i) = local_vphi;
-	   prim(IDN,k,j,ie+i+1) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   prim(IVX,k,j,ie+i+1) = local_vr; 
-	   prim(IVY,k,j,ie+i+1) = 0.0;
-	   prim(IVZ,k,j,ie+i+1) = local_vphi;
-	   if (NON_BAROTROPIC_EOS){
-	     prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
-	     prim(IPR,k,j,ie+i+1) = prim(IDN,k,j,ie+i+1)*(temp_stream/temp_unit);
-	   }
+	  if (uniform_stream == 1){
+	    prim(IDN,k,j,ie+i) = local_dens_now_;
+	  }else{
+	    prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist * dist)/(h_stream * h_stream)/2.0);
+	  }
+	  prim(IVX,k,j,ie+i) = local_vr; 
+	  prim(IVY,k,j,ie+i) = local_vtheta;
+	  prim(IVZ,k,j,ie+i) = local_vphi;
+	  
+	  if (NON_BAROTROPIC_EOS){
+	    prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
+	  }
 		   
-	 }else if (i==2){
-	   prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   prim(IVX,k,j,ie+i) = local_vr; 
-	   prim(IVY,k,j,ie+i) = 0.0;
-	   prim(IVZ,k,j,ie+i) = local_vphi;
-	   prim(IDN,k,j,ie+i-1) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
-	   prim(IVX,k,j,ie+i-1) = local_vr; 
-	   prim(IVY,k,j,ie+i-1) = 0.0;
-	   prim(IVZ,k,j,ie+i-1) = local_vphi;
-           if (NON_BAROTROPIC_EOS){
-             prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
-             prim(IPR,k,j,ie+i-1) = prim(IDN,k,j,ie+i-1)*(temp_stream/temp_unit);
-           }
-	 }else{
-	   printf("Do not find X1 outer boundary cell to inject stream\n");
-	 }
+	 // }else if (i==2){
+	 //   prim(IDN,k,j,ie+i) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
+	 //   prim(IVX,k,j,ie+i) = local_vr; 
+	 //   prim(IVY,k,j,ie+i) = 0.0;
+	 //   prim(IVZ,k,j,ie+i) = local_vphi;
+	 //   prim(IDN,k,j,ie+i-1) = local_dens_now_*exp(-(dist*dist)/(r0*r0));
+	 //   prim(IVX,k,j,ie+i-1) = local_vr; 
+	 //   prim(IVY,k,j,ie+i-1) = 0.0;
+	 //   prim(IVZ,k,j,ie+i-1) = local_vphi;
+         //   if (NON_BAROTROPIC_EOS){
+         //     prim(IPR,k,j,ie+i) = prim(IDN,k,j,ie+i)*(temp_stream/temp_unit);
+         //     prim(IPR,k,j,ie+i-1) = prim(IDN,k,j,ie+i-1)*(temp_stream/temp_unit);
+         //   }
+	 // }else{
+	 //   printf("Do not find X1 outer boundary cell to inject stream\n");
+	 // }
 	 
 	}else{//one-direction outflow
 	  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
@@ -1308,121 +1138,117 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
     }//end theta
   }//end Phi
   
-  if (MAGNETIC_FIELDS_ENABLED) {
-    Real ph_inj = phi_inject;
-    Real th_inj = PI/2.0;
-    for(int k=ks; k<=ke; ++k){
-      for(int j=js; j<=je; ++j){
-#pragma simd
-      for(int i=1; i<=ngh; ++i){
-	Real r_inj;
-	Real radiusac;
-	if (i==1){
-	  r_inj = rad_inject;
-	  //r_inj=pco->x1f(ie+2);
-	  radiusac=pco->x1f(ie+2);
-	} else {
-	  r_inj = rad_inject2;
-	  //r_inj=pco->x1f(ie+3);
-	  radiusac=pco->x1f(ie+3);
-	}
-	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
-	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
-	Real z_inj = r_inj * cos(th_inj);
-        Real radius=pco->x1v(ie+i);
-        Real theta=pco->x2v(j);
-        Real phi=pco->x3v(k);
-        Real x_now=radiusac*sin(theta)*cos(phi);
-        Real y_now=radiusac*sin(theta)*sin(phi);
-        Real z_now=radiusac*cos(theta);
-        Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
-			  (y_now- y_inj)*(y_now - y_inj)+
-			  (z_now - z_inj)*(z_now - z_inj));
-	if (dinj < rinj_thresh){ //injection cells
-          Real dist = sqrt(radius*radius + r_inj*r_inj - 2.0*radius*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + 
-									   cos(theta)*cos(th_inj)));
-          Real atheta = b0*r0*exp(-(dist*dist)/(r0*r0));
-	  Real ddist2dphi = 2.0*radius*r_inj*sin(theta)*sin(th_inj)*sin(phi-ph_inj);
-	  b.x1f(k,j,ie+i+1) = 1.0/(radius*sin(theta)) * atheta * (1.0/(r0*r0)) * ddist2dphi;
-	}
-	else{
-	  b.x1f(k,j,ie+i+1) = b.x1f(k,j,ie+1); //outflow BC for non-injection cells
-	}
-      }}}
+//   if (MAGNETIC_FIELDS_ENABLED) {
+//     Real ph_inj = phi_inject;
+//     Real th_inj = PI/2.0;
+//     for(int k=ks; k<=ke; ++k){
+//       for(int j=js; j<=je; ++j){
+// #pragma simd
+//       for(int i=1; i<=ngh; ++i){
+// 	Real r_inj;
+// 	Real radiusac;
 
-    for(int k=ks; k<=ke; ++k){
-    for(int j=js; j<=je+1; ++j){
-#pragma simd
-      for(int i=1; i<=ngh; ++i){
-        Real radius=pco->x1v(ie+i);
-        Real theta=pco->x2v(j); 
-        Real phi=pco->x3v(k);
-	Real r_inj;
-	Real radiusac;
-	if (i==1){
-	  r_inj = rad_inject;
-	  //r_inj=pco->x1f(ie+2);
-	  radiusac=pco->x1f(ie+2);
-	} else {
-	  r_inj = rad_inject2;
-	  //r_inj=pco->x1f(ie+3);
-	  radiusac=pco->x1f(ie+3);
-	}
-        Real x_now=radiusac*sin(theta)*cos(phi);
-        Real y_now=radiusac*sin(theta)*sin(phi);
-        Real z_now=radiusac*cos(theta);
-	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
-	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
-	Real z_inj = r_inj * cos(th_inj);
-        Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
-			  (y_now- y_inj)*(y_now - y_inj)+
-			  (z_now - z_inj)*(z_now - z_inj));
+// 	  r_inj = rad_inject;
+// 	  //r_inj=pco->x1f(ie+2);
+// 	  radiusac=pco->x1f(ie+2);
+
+// 	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
+// 	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
+// 	Real z_inj = r_inj * cos(th_inj);
+//         Real radius=pco->x1v(ie+i);
+//         Real theta=pco->x2v(j);
+//         Real phi=pco->x3v(k);
+//         Real x_now=radiusac*sin(theta)*cos(phi);
+//         Real y_now=radiusac*sin(theta)*sin(phi);
+//         Real z_now=radiusac*cos(theta);
+//         Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
+// 			  (y_now- y_inj)*(y_now - y_inj)+
+// 			  (z_now - z_inj)*(z_now - z_inj));
+// 	if (dinj < rinj_thresh){ //injection cells
+//           Real dist = sqrt(radius*radius + r_inj*r_inj - 2.0*radius*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + 
+// 									   cos(theta)*cos(th_inj)));
+//           Real atheta = b0*r0*exp(-(dist*dist)/(r0*r0));
+// 	  Real ddist2dphi = 2.0*radius*r_inj*sin(theta)*sin(th_inj)*sin(phi-ph_inj);
+// 	  b.x1f(k,j,ie+i+1) = 1.0/(radius*sin(theta)) * atheta * (1.0/(r0*r0)) * ddist2dphi;
+// 	}
+// 	else{
+// 	  b.x1f(k,j,ie+i+1) = b.x1f(k,j,ie+1); //outflow BC for non-injection cells
+// 	}
+//       }}}
+
+//     for(int k=ks; k<=ke; ++k){
+//     for(int j=js; j<=je+1; ++j){
+// #pragma simd
+//       for(int i=1; i<=ngh; ++i){
+//         Real radius=pco->x1v(ie+i);
+//         Real theta=pco->x2v(j); 
+//         Real phi=pco->x3v(k);
+// 	Real r_inj;
+// 	Real radiusac;
+// 	if (i==1){
+// 	  r_inj = rad_inject;
+// 	  //r_inj=pco->x1f(ie+2);
+// 	  radiusac=pco->x1f(ie+2);
+// 	} else {
+// 	  r_inj = rad_inject2;
+// 	  //r_inj=pco->x1f(ie+3);
+// 	  radiusac=pco->x1f(ie+3);
+// 	}
+//         Real x_now=radiusac*sin(theta)*cos(phi);
+//         Real y_now=radiusac*sin(theta)*sin(phi);
+//         Real z_now=radiusac*cos(theta);
+// 	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
+// 	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
+// 	Real z_inj = r_inj * cos(th_inj);
+//         Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
+// 			  (y_now- y_inj)*(y_now - y_inj)+
+// 			  (z_now - z_inj)*(z_now - z_inj));
  
-	if (dinj < rinj_thresh){ //injection cells
-	  b.x2f(k,j,ie+i) = 0.0;
-	}else{
-	  b.x2f(k,j,ie+i) = b.x2f(k,j,ie); //outflow 
-	}
-      }}}
+// 	if (dinj < rinj_thresh){ //injection cells
+// 	  b.x2f(k,j,ie+i) = 0.0;
+// 	}else{
+// 	  b.x2f(k,j,ie+i) = b.x2f(k,j,ie); //outflow 
+// 	}
+//       }}}
 
-    for(int k=ks; k<=ke+1; ++k){
-    for(int j=js; j<=je; ++j){
-#pragma simd
-      for(int i=1; i<=ngh; ++i){
-        Real radius=pco->x1v(ie+i); 
-        Real theta=pco->x2v(j); 
-        Real phi=pco->x3v(k);
-	Real r_inj;
-	Real radiusac;
-	if (i==1){
-	  //r_inj = rad_inject;
-	  r_inj=pco->x1f(ie+2);
-	  radiusac=pco->x1f(ie+2);
-	} else {
-	  //r_inj = rad_inject2;
-	  r_inj=pco->x1f(ie+3);
-	  radiusac=pco->x1f(ie+3);
-	}
-        Real x_now=radiusac*sin(theta)*cos(phi);
-        Real y_now=radiusac*sin(theta)*sin(phi);
-        Real z_now=radiusac*cos(theta);
-	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
-	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
-	Real z_inj = r_inj * cos(th_inj);
-        Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
-			  (y_now- y_inj)*(y_now - y_inj)+
-			  (z_now - z_inj)*(z_now - z_inj));
-	if (dinj < rinj_thresh){ //injection cells
-	  Real dist = sqrt(radius*radius + r_inj*r_inj - 2.0*radius*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + 
-									   cos(theta)*cos(th_inj)));
-	  Real atheta = b0*r0*exp(-(dist*dist)/(r0*r0));
-	  Real ddist2dr = 2.0*radius - 2*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + cos(theta)*cos(th_inj));
-	  b.x3f(k,j,ie+i) = atheta/radius - atheta*(1.0/(r0*r0))*ddist2dr;
-	}else{
-	  b.x3f(k,j,ie+i) = b.x3f(k,j,ie); //outflow
-	}
-      }}}
-  }
+//     for(int k=ks; k<=ke+1; ++k){
+//     for(int j=js; j<=je; ++j){
+// #pragma simd
+//       for(int i=1; i<=ngh; ++i){
+//         Real radius=pco->x1v(ie+i); 
+//         Real theta=pco->x2v(j); 
+//         Real phi=pco->x3v(k);
+// 	Real r_inj;
+// 	Real radiusac;
+// 	if (i==1){
+// 	  //r_inj = rad_inject;
+// 	  r_inj=pco->x1f(ie+2);
+// 	  radiusac=pco->x1f(ie+2);
+// 	} else {
+// 	  //r_inj = rad_inject2;
+// 	  r_inj=pco->x1f(ie+3);
+// 	  radiusac=pco->x1f(ie+3);
+// 	}
+//         Real x_now=radiusac*sin(theta)*cos(phi);
+//         Real y_now=radiusac*sin(theta)*sin(phi);
+//         Real z_now=radiusac*cos(theta);
+// 	Real x_inj = r_inj * cos(ph_inj) * sin(th_inj);
+// 	Real y_inj = r_inj * sin(ph_inj) * sin(th_inj);
+// 	Real z_inj = r_inj * cos(th_inj);
+//         Real dinj= sqrt((x_now - x_inj)*(x_now - x_inj)+
+// 			  (y_now- y_inj)*(y_now - y_inj)+
+// 			  (z_now - z_inj)*(z_now - z_inj));
+// 	if (dinj < rinj_thresh){ //injection cells
+// 	  Real dist = sqrt(radius*radius + r_inj*r_inj - 2.0*radius*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + 
+// 									   cos(theta)*cos(th_inj)));
+// 	  Real atheta = b0*r0*exp(-(dist*dist)/(r0*r0));
+// 	  Real ddist2dr = 2.0*radius - 2*r_inj*(sin(theta)*sin(th_inj)*cos(phi-ph_inj) + cos(theta)*cos(th_inj));
+// 	  b.x3f(k,j,ie+i) = atheta/radius - atheta*(1.0/(r0*r0))*ddist2dr;
+// 	}else{
+// 	  b.x3f(k,j,ie+i) = b.x3f(k,j,ie); //outflow
+// 	}
+//       }}}
+//   }
 
 }
 
@@ -1685,6 +1511,289 @@ void GetCombineOpacity(MeshBlock *pmb, AthenaArray<Real> &prim){
 
 }
 
+void ReadOpacityTable(){
+    if (opacity_file!="None" && (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED)){
+      
+      //load combined opacity
+      combine_temp_grid.NewAthenaArray(n_tem);
+      combine_rho_grid.NewAthenaArray(n_rho);
+      combine_ross_table.NewAthenaArray(n_tem, n_rho);
+      combine_planck_table.NewAthenaArray(n_tem, n_rho);
+      
+      FILE *f_combineopacity;
+      
+      if ( (f_combineopacity=fopen(opacity_file.c_str(),"r"))==NULL )
+	{
+	  //printf("Open input file error combined opacity table %s\n", opacity_file.c_str());
+	  //return;
+	  std::stringstream msg;
+	  msg << "FATAL ERROR: Could not open opacity file "<< opacity_file.c_str() << std::endl;
+	  ATHENA_ERROR(msg);
+	}
+      
+      //first two lines are n_temp, n_rho
+      int buff;
+      for(int i=0; i<2; i++){
+	fscanf(f_combineopacity,"%d",&(buff));
+      }
+      
+      //load temperature grid
+      for(int i=0; i<n_tem; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
+      }
+      
+      //load density grid
+      for(int i=0; i<n_rho; ++i){
+	fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
+      }
+      
+      //load grey Rosseland mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
+	}
+      }
+      
+      //load grey Planck mean opacity
+      for (int j=0; j<n_tem; ++j){
+	for (int i=0; i<n_rho; ++i){
+	  fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
+	}
+      }
+      
+      fclose(f_combineopacity);
+      
+      // printf("testing opacity table\n");
+      // Real kappa_p_test, kappa_r_test;
+      // combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
+      // printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
+    }
+
+}
+
+
+void get_uniform_table_opacity(const Real rho, const Real tgas,
+                               Real &kappa, Real &kappa_planck){
+    // STEP 1: fractional-index positions in log space.
+    Real logT   = log10(std::max(tgas, 1.0e-10));
+    Real logrho = log10(std::max(rho, 1.0e-32));
+
+    Real posT   = (logT   - log_tmin_u  ) * inv_dlogT_u;
+    Real posrho = (logrho - log_rhomin_u) * inv_dlogrho_u;
+
+    // STEP 2: base/upper indices and in-cell fractions, with edge clamping.
+    int nt1, nt2;
+    Real fT;
+    if (posT <= 0.0) {
+      nt1 = 0;
+      nt2 = 0;
+      fT = 0.0;
+    } else if (posT >= static_cast<Real>(n_tem - 1)) {
+      nt1 = n_tem - 1;
+      nt2 = n_tem - 1;
+      fT = 0.0;
+    } else {
+      nt1 = static_cast<int>(std::floor(posT));
+      nt2 = nt1 + 1;
+      fT  = posT - static_cast<Real>(nt1);
+    }
+
+    int nrho1, nrho2;
+    Real frho;
+    if (posrho <= 0.0) {
+      nrho1 = 0;
+      nrho2 = 0;
+      frho = 0.0;
+    } else if (posrho >= static_cast<Real>(n_rho - 1)) {
+      nrho1 = n_rho - 1;  nrho2 = n_rho - 1;  frho = 0.0;
+    } else {
+      nrho1 = static_cast<int>(std::floor(posrho));
+      nrho2 = nrho1 + 1;
+      frho  = posrho - static_cast<Real>(nrho1);
+    }
+
+    // STEP 3: read 4 corners in log(kappa).  Tables are indexed [n_tem, n_rho].
+    Real lkr_11 = uniform_ross_table(nt1, nrho1);
+    Real lkr_12 = uniform_ross_table(nt1, nrho2);
+    Real lkr_21 = uniform_ross_table(nt2, nrho1);
+    Real lkr_22 = uniform_ross_table(nt2, nrho2);
+
+    Real lkp_11 = uniform_planck_table(nt1, nrho1);
+    Real lkp_12 = uniform_planck_table(nt1, nrho2);
+    Real lkp_21 = uniform_planck_table(nt2, nrho1);
+    Real lkp_22 = uniform_planck_table(nt2, nrho2);
+
+    // STEP 4: above Tmax, apply Kramers T^-3.5 to both Rosseland and Planck.
+    Real log_tmax_u = log_tmin_u
+                    + static_cast<Real>(n_tem - 1) / inv_dlogT_u;
+    if (logT > log_tmax_u) {
+      Real logscale = -3.5 * (logT - log_tmax_u);
+      lkr_11 += logscale;
+      lkr_12 += logscale;
+      lkr_21 += logscale;
+      lkr_22 += logscale;
+
+      lkp_11 += logscale;
+      lkp_12 += logscale;
+      lkp_21 += logscale;
+      lkp_22 += logscale;
+    }
+
+    // STEP 5: bilinear in log space.
+    Real w11 = (1.0 - fT) * (1.0 - frho);
+    Real w12 = (1.0 - fT) * frho;
+    Real w21 = fT * (1.0 - frho);
+    Real w22 = fT * frho;
+
+    Real log_kappa_ross   = w11*lkr_11 + w12*lkr_12 + w21*lkr_21 + w22*lkr_22;
+    Real log_kappa_planck = w11*lkp_11 + w12*lkp_12 + w21*lkp_21 + w22*lkp_22;
+
+    kappa = std::pow(10.0, log_kappa_ross);
+    kappa_planck = std::pow(10.0, log_kappa_planck);
+
+    return;
+}
+
+//this largely is to match current athenak treatment of opacity
+void UniformTableOapcity(MeshBlock *pmb, AthenaArray<Real> &prim){
+
+  NRRadiation *prad = pmb->pnrrad;
+  int il = pmb->is; int jl = pmb->js; int kl = pmb->ks;
+  int iu = pmb->ie; int ju = pmb->je; int ku = pmb->ke;
+  il -= NGHOST;
+  iu += NGHOST;
+  if(ju > jl){
+    jl -= NGHOST;
+    ju += NGHOST;
+  }
+  if(ku > kl){
+    kl -= NGHOST;
+    ku += NGHOST;
+  }
+
+  Real T_ion    = 1.0e4; // above this H fully ionized, electron scattering on
+  Real T_recomb = 3.0e3; // below this H mostly neutral, pure absorption
+  Real rho_min_cgs = std::pow(10.0, log_rhomin_u);
+  Real tiny_kappa  = 1.0e-18; // numerical scatter floor below rho_min
+
+  for (int k=kl; k<=ku; ++k) {
+  for (int j=jl; j<=ju; ++j) {
+  for (int i=il; i<=iu; ++i) {
+
+    Real rho  = prim(IDN,k,j,i);
+    Real gast = std::max(prim(IPR,k,j,i)/rho, tfloor);
+    Real rho_cgs  = rho  * rho_unit;
+    Real gast_cgs = gast * temp_unit;
+
+    if (rho_cgs < rho_min_cgs){
+      Real kappa_ross_edge, kappa_planck_edge;
+      get_uniform_table_opacity(rho_min_cgs, gast_cgs,
+                                kappa_ross_edge, kappa_planck_edge);
+
+      // kappa_ross at rho_min is treated as pure absorption, not scatter.
+      Real k_abs_floor = kappa_floor;
+      if (kappa_floor_cap_planck == 1){
+        k_abs_floor = std::min(kappa_floor, kappa_ross_edge);
+      }
+
+      prad->sigma_s(k,j,i,0)  = rho * tiny_kappa  / kappa_unit;
+      prad->sigma_a(k,j,i,0)  = rho * k_abs_floor / kappa_unit;
+      prad->sigma_pe(k,j,i,0) = rho * k_abs_floor / kappa_unit;
+      prad->sigma_p(k,j,i,0)  = rho * k_abs_floor / kappa_unit;
+      continue;
+    }
+
+    Real kappa_ross_sct, kappa_planck;
+    get_uniform_table_opacity(rho_cgs, gast_cgs, kappa_ross_sct, kappa_planck);
+
+    Real kappa_ross = 0.0;
+    Real kappa_sct  = 0.0;
+    if (kappa_ross_sct < kappa_es){
+      if (gast_cgs < T_ion){
+        kappa_ross = kappa_ross_sct;
+        kappa_sct  = 0.0;
+      }else{
+        kappa_ross = 0.0;
+        kappa_sct  = std::max(kappa_ross_sct, 0.0);
+      }
+    }else{
+      if (gast_cgs > T_recomb){
+        kappa_ross = std::max(kappa_ross_sct - kappa_es, 0.0);
+        kappa_sct  = kappa_es;
+      }else{ 
+        kappa_ross = kappa_ross_sct;
+        kappa_sct  = 0.0;
+      }
+    }
+
+    prad->sigma_s(k,j,i,0)  = rho * kappa_sct / kappa_unit;
+    prad->sigma_a(k,j,i,0)  = rho * kappa_ross / kappa_unit;
+    prad->sigma_pe(k,j,i,0) = rho * kappa_planck / kappa_unit;
+    prad->sigma_p(k,j,i,0)  = rho * kappa_planck / kappa_unit;
+
+  }}}//end kji
+
+}
+
+
+void ReadUniformOpacityTable(){
+  if (opacity_file == "None" || !(NR_RADIATION_ENABLED || IM_RADIATION_ENABLED))
+    return;
+
+  uniform_temp_grid.NewAthenaArray(n_tem);
+  uniform_rho_grid.NewAthenaArray(n_rho);
+  uniform_ross_table.NewAthenaArray(n_tem, n_rho);
+  uniform_planck_table.NewAthenaArray(n_tem, n_rho);
+
+  FILE *f_uniform;
+  if ((f_uniform = fopen(opacity_file.c_str(), "r")) == NULL){
+    std::stringstream msg;
+    msg << "FATAL ERROR: Could not open uniform opacity file "
+        << opacity_file.c_str() << std::endl;
+    ATHENA_ERROR(msg);
+  }
+
+  // header: n_tem, n_rho (consumed; we trust the input-file values)
+  int buff;
+  for (int i=0; i<2; ++i){
+    fscanf(f_uniform, "%d", &buff);
+  }
+  for (int i=0; i<n_tem; ++i){
+    fscanf(f_uniform, "%lf", &(uniform_temp_grid(i)));
+  }
+  for (int i=0; i<n_rho; ++i){
+    fscanf(f_uniform, "%lf", &(uniform_rho_grid(i)));
+  }
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      fscanf(f_uniform, "%lf", &(uniform_ross_table(j, i)));
+    }
+  }
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      fscanf(f_uniform, "%lf", &(uniform_planck_table(j, i)));
+    }
+  }
+  fclose(f_uniform);
+
+  // log-uniform grid parameters once.
+  log_tmin_u    = log10(uniform_temp_grid(0));
+  log_rhomin_u  = log10(uniform_rho_grid(0));
+  inv_dlogT_u   = static_cast<Real>(n_tem - 1)
+                / (log10(uniform_temp_grid(n_tem - 1)) - log_tmin_u);
+  inv_dlogrho_u = static_cast<Real>(n_rho - 1)
+                / (log10(uniform_rho_grid(n_rho - 1)) - log_rhomin_u);
+
+  const Real tiny_kappa = 1.0e-24;
+  for (int j=0; j<n_tem; ++j){
+    for (int i=0; i<n_rho; ++i){
+      uniform_ross_table(j, i)   = log10(std::max(uniform_ross_table(j, i),
+                                                  tiny_kappa));
+      uniform_planck_table(j, i) = log10(std::max(uniform_planck_table(j, i),
+                                                  tiny_kappa));
+    }
+  }
+}
 
 
 Real massflux_AInj_x1(MeshBlock *pmb, int iout){
