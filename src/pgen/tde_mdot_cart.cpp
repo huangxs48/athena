@@ -32,7 +32,7 @@
 #include "../nr_radiation/radiation.hpp"
 #include "../nr_radiation/integrators/rad_integrators.hpp"
 
-static Real GM1, gm;
+static Real gm;
 static Real kappa_es;
 static Real temp_unit,l_unit,rho_unit;
 static Real kappa_unit, kappa_es_code;
@@ -211,7 +211,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // int theta_base = pin->GetInteger("mesh","nx2");
   // delta_theta_base = (theta_max - theta_min)/theta_base * blocksizex2_base;
 
-  GM1 = pin->GetOrAddReal("problem","GM1",1.0);
   kappa_es = pin->GetReal("problem", "kappa_es");
 
   temp_unit = pin->GetReal("problem", "temp_unit");
@@ -908,10 +907,10 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	}else{//one-direction outflow
 	  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
 	  prim(IVX,k,j,ie+i) = std::max(0.0, prim(IVX,k,j,ie));
-	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);//pco->x1v(ie+i)*sqrt(GM1/pow(pco->x1v(ie+i),3));
+	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);
 	  prim(IVY,k,j,ie+i) = prim(IVY,k,j,ie);
 	  if (NON_BAROTROPIC_EOS)
-	    prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie); //is a temperature floor necessary?
+	    prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie); 
 	  
 	}
 	//maybe label these cells so it doesn't have to select them again in b fields? 

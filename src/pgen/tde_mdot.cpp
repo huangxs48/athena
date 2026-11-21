@@ -31,7 +31,7 @@
 #include "../nr_radiation/radiation.hpp"
 #include "../nr_radiation/integrators/rad_integrators.hpp"
 
-static Real GM1, gm;
+static Real gm;
 static Real kappa_es;
 static Real temp_unit,l_unit,rho_unit;
 static Real kappa_unit, kappa_es_code;
@@ -185,7 +185,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   int theta_base = pin->GetInteger("mesh","nx2");
   delta_theta_base = (theta_max - theta_min)/theta_base * blocksizex2_base;
 
-  GM1 = pin->GetOrAddReal("problem","GM1",1.0);
   kappa_es = pin->GetReal("problem", "kappa_es");
 
   temp_unit = pin->GetReal("problem", "temp_unit");
@@ -844,24 +843,24 @@ void GeneralNewtonianPotential(MeshBlock *pmb, const Real time, const Real dt, c
 	Real vth = prim(IVY, k,j,i);//pmb->phydro->u(IM2,k,j,i)/pmb->phydro->u(IDN,k,j,i);
 	Real vph = prim(IVZ, k,j,i);//pmb->phydro->u(IM3,k,j,i)/pmb->phydro->u(IDN,k,j,i);
 
-        Real gm1=GM1;
+        gm = 1.0;
 	if (NR_RADIATION_ENABLED){	
-            gm1 = pmb->pnrrad->crat * pmb->pnrrad->crat / 2.0;
+            gm = pmb->pnrrad->crat * pmb->pnrrad->crat / 2.0;
 	}
 	Real rho = prim(IDN,k,j,i);
 
 	//get r_dd, th_dd, ph_dd as in Eq 2.14, 2.15, 2.16
 	//v_th = th_d * r, v_ph = ph_d * r * sinth
-	Real r_dd = - gm1 * (1.0 - 1.0/r) * (1.0 - 1.0/r)/(r * r);
+	Real r_dd = - gm * (1.0 - 1.0/r) * (1.0 - 1.0/r)/(r * r);
 	r_dd += vr * vr / (r*(r-1.0));
 	r_dd += (vth * vth + vph * vph) * (r - 3.0/2.0)/(r * r);
 
 	Real th_dd = -(2.0 * vr * vth/(r * r)) * (r-3.0/2.0)/(r-1.0) + vph*vph/(r * r)*(costh/sinth);
 	Real ph_dd = -(2.0 * vr * vph/(r * r)/sinth) * (r-3.0/2.0)/(r-1.0) - (2.0/tanth)*vph*vth/(r * r)/sinth;
 	
-	//Real acc1 = gm1/((r-1.0)*(r-1.0));
+	//Real acc1 = gm/((r-1.0)*(r-1.0));
 	//acceleration in all directions
-	Real acc1 = -gm1 * pow(1.0/r, 2) * pow(1.0 - 1.0/r, 2) + pow(vr, 2)/r/(r-1.0) - (3.0/2.0)*pow(1.0/r, 2)*(pow(vth, 2) + pow(vph, 2));//r_dd - r*pow(vth/r, 2) - r*pow(vph/r, 2);
+	Real acc1 = -gm * pow(1.0/r, 2) * pow(1.0 - 1.0/r, 2) + pow(vr, 2)/r/(r-1.0) - (3.0/2.0)*pow(1.0/r, 2)*(pow(vth, 2) + pow(vph, 2));//r_dd - r*pow(vth/r, 2) - r*pow(vph/r, 2);
 	Real acc2 = vr * vth /r/(r - 1.0); //r*th_dd + 2.0*vr*(vth/r) - r*sinth*costh*pow(vph/r/sinth, 2);
 	Real acc3 = vr * vph /r/(r - 1.0);//r*sinth*ph_dd + 2.0*vr*(vph/r) + 2.0*r*costh*(vph/r/sinth)*(vth/r);
 
@@ -1125,7 +1124,7 @@ void StreamInjectOuterX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &pr
 	}else{//one-direction outflow
 	  prim(IDN,k,j,ie+i) = prim(IDN,k,j,ie);
 	  prim(IVX,k,j,ie+i) = std::max(0.0, prim(IVX,k,j,ie));
-	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);//pco->x1v(ie+i)*sqrt(GM1/pow(pco->x1v(ie+i),3));
+	  prim(IVZ,k,j,ie+i) = prim(IVZ,k,j,ie);
 	  prim(IVY,k,j,ie+i) = prim(IVY,k,j,ie);
 	  if (NON_BAROTROPIC_EOS)
 	    prim(IPR,k,j,ie+i) = prim(IPR,k,j,ie); //is a temperature floor necessary?
