@@ -101,6 +101,7 @@ static Real x_thresh, y_thresh, z_thresh;
 static int blocksizex1_base, blocksizex2_base, blocksizex3_base;
 static Real delta_theta_base;
 static Real x_coarse_thresh, y_coarse_thresh, z_coarse_thresh;
+static Real dis_coarse_thresh;
 
 //stream injection boundary
 static Real r0, inj_thresh, b0;
@@ -251,6 +252,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   x_coarse_thresh = pin->GetOrAddReal("problem", "x_coarse_thresh", 0.1);
   y_coarse_thresh = pin->GetOrAddReal("problem", "y_coarse_thresh", 0.1);
   z_coarse_thresh = pin->GetOrAddReal("problem", "z_coarse_thresh", 0.1);
+  dis_coarse_thresh = pin->GetOrAddReal("problem", "dis_coarse_thresh", 0.1);
 
   //stream injection boundary
   b0 = pin->GetOrAddReal("problem", "b0", 0.1);
@@ -328,7 +330,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   //printf("testing spline txt, mdot_table_ng(7):%g, mdot_coef:%g %g %g %g\n", mdot_x_breaks(7), mdot_coef(7, 0), mdot_coef(7, 1), mdot_coef(7, 2), mdot_coef(7, 3));
 
-  if (NR_RADIATION_ENABLED){
+  if (NR_RADIATION_ENABLED || IM_RADIATION_ENABLED){
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
       EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
@@ -470,16 +472,20 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
        //Real dr = (pcoord->dx1f(i-1)+pcoord->dx1f(i+1))/2.0;
        //Real dphi = (pcoord->dx3f(k-1)+pcoord->dx3f(k+1))/2.0;
        //Real dth = (pcoord->dx2f(j-1)+pcoord->dx2f(j+1))/2.0;	  
+       Real dis_to_inj = sqrt((x_coord - x_inj)*(x_coord - x_inj)
+		             +(y_coord - y_inj)*(y_coord - y_inj)
+			     +(z_coord - z_inj)*(z_coord - z_inj));
 
        //injection point
-       if (fabs(x_coord-x_inj) <= x_coarse_thresh){
-       	 if (fabs(y_coord-y_inj) <= y_coarse_thresh){// if within L1 point
-       	   if (fabs(z_coord - z_inj)<= z_coarse_thresh){
+       if (fabs(dis_to_inj) <= dis_coarse_thresh){
+       //if (fabs(x_coord-x_inj) <= x_coarse_thresh){
+       	 //if (fabs(y_coord-y_inj) <= y_coarse_thresh){// if within L1 point
+       	   //if (fabs(z_coord - z_inj)<= z_coarse_thresh){
        	     //printf("coarse\n");
 	     //printf("r:%g, ph:%g, th:%g, dis_r:%g, dis_phi:%g, dis_th:%g, i:%d, gid:%d, dr:%g, dph:%g, dth:%g\n", rad, phi_coord, theta_coord, fabs(rad-x_inject), fabs(phi_coord - y_inject), fabs(theta_coord - PI/2.0), i, gid, pcoord->dx1f(i), pcoord->dx3f(k), pcoord->dx2f(j));
        	     iuser_meshblock_data[0](0) = 1;
-       	   }
-       	 }
+       	   //}
+       	 //}
        }//end injection point
 
 
