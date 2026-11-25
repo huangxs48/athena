@@ -102,6 +102,12 @@ static int blocksizex1_base, blocksizex2_base, blocksizex3_base;
 static Real delta_theta_base;
 static Real x_coarse_thresh, y_coarse_thresh, z_coarse_thresh;
 static Real dis_coarse_thresh;
+Real dens_jump_refine;
+Real dens_jump_derefine;
+Real dens_refine;
+Real dens_derefine;
+Real dis_to_bh;
+Real dis_to_inj;
 
 //stream injection boundary
 static Real r0, inj_thresh, b0;
@@ -173,7 +179,7 @@ Real massfluxix1(MeshBlock *pmb, int iout);
 Real massfluxox1(MeshBlock *pmb, int iout);
 
 //AMR condition
-int RefinementCondition3(MeshBlock *pmb);
+int RefinementCondition(MeshBlock *pmb);
 Real orbit_fit_r(Real phi);
 Real orbit_fit_phi(Real r);
 
@@ -207,10 +213,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   blocksizex1_base = pin->GetOrAddInteger("meshblock", "nx1", 1);
   blocksizex2_base = pin->GetOrAddInteger("meshblock", "nx2", 1);
   blocksizex3_base = pin->GetOrAddInteger("meshblock", "nx3", 1);
-  // int theta_max = pin->GetReal("mesh","x2max");
-  // int theta_min = pin->GetReal("mesh","x2min");
-  // int theta_base = pin->GetInteger("mesh","nx2");
-  // delta_theta_base = (theta_max - theta_min)/theta_base * blocksizex2_base;
 
   kappa_es = pin->GetReal("problem", "kappa_es");
 
@@ -246,13 +248,17 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   user_fallback_rate = pin->GetOrAddInteger("problem", "user_fallback_rate", 0);
   mdot_norm = pin->GetOrAddReal("problem", "mdot_norm", 1.0);
 
-  //x_thresh = pin->GetOrAddReal("problem", "x_thresh", 0.1);  
-  //y_thresh = pin->GetOrAddReal("problem", "y_thresh", 0.01);
-  //z_thresh = pin->GetOrAddReal("problem", "z_thresh", 0.01);
+  //refinement related
   x_coarse_thresh = pin->GetOrAddReal("problem", "x_coarse_thresh", 0.1);
   y_coarse_thresh = pin->GetOrAddReal("problem", "y_coarse_thresh", 0.1);
   z_coarse_thresh = pin->GetOrAddReal("problem", "z_coarse_thresh", 0.1);
   dis_coarse_thresh = pin->GetOrAddReal("problem", "dis_coarse_thresh", 0.1);
+  dens_jump_refine = pin->GetOrAddReal("problem", "dens_jump_refine", 1.0e6);
+  dens_jump_derefine = pin->GetOrAddReal("problem", "dens_jump_derefine", 1.0e-6);
+  dens_refine = pin->GetOrAddReal("problem", "dens_refine", 1.0e6);
+  dens_derefine = pin->GetOrAddReal("problem", "dens_derefine", 1.0e-6);
+  dis_to_bh = pin->GetOrAddReal("problem", "dis_to_bh", 1.0);
+  dis_to_inj = pin->GetOrAddReal("problem", "dis_to_inj", 1.0);
 
   //stream injection boundary
   b0 = pin->GetOrAddReal("problem", "b0", 0.1);
@@ -302,7 +308,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // Enroll AMR
   if(adaptive==true)
-   EnrollUserRefinementCondition(RefinementCondition3);
+   EnrollUserRefinementCondition(RefinementCondition);
 
   //load mdot table
   mdot_table.NewAthenaArray(mdot_table_ng);//segment bounds for cubic spline fitting
@@ -350,58 +356,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
       EnrollUserRadBoundaryFunction(BoundaryFace::outer_x3, RadOuterX3);
     }
-
-    // //load combined opacity
-    // combine_temp_grid.NewAthenaArray(n_tem);
-    // combine_rho_grid.NewAthenaArray(n_rho);
-    // combine_ross_table.NewAthenaArray(n_tem, n_rho);
-    // combine_planck_table.NewAthenaArray(n_tem, n_rho);
-
-    // FILE *f_combineopacity;
-    
-    // if ( (f_combineopacity=fopen("./output_grey_combined.txt","r"))==NULL )
-    // {
-    //   printf("Open input file error combined opacity table");
-    //   return;
-    // }
-    // //first two lines are n_temp, n_rho
-    // int buff;
-    // for(int i=0; i<2; i++){
-    //   fscanf(f_combineopacity,"%d",&(buff));
-    // }
-
-    // //load temperature grid
-    // for(int i=0; i<n_tem; ++i){
-    //   fscanf(f_combineopacity, "%lf", &(combine_temp_grid(i)));
-    // }
-
-    // //load density grid
-    // for(int i=0; i<n_rho; ++i){
-    //   fscanf(f_combineopacity, "%lf", &(combine_rho_grid(i)));
-    // }
-
-    // //load grey Rosseland mean opacity
-    // for (int j=0; j<n_tem; ++j){
-    //   for (int i=0; i<n_rho; ++i){
-    // 	fscanf(f_combineopacity, "%lf", &(combine_ross_table(j, i)));
-    //   }
-    // }
-
-    // //load grey Planck mean opacity
-    // for (int j=0; j<n_tem; ++j){
-    //   for (int i=0; i<n_rho; ++i){
-    // 	fscanf(f_combineopacity, "%lf", &(combine_planck_table(j, i)));
-    //   }
-    // }
-
-    // fclose(f_combineopacity);
-
-    //printf("testing frequency table\n");
-    //printf("grey planck:%g, ross:%g\n", combine_planck_table(30, 50), combine_ross_table(30, 50));
-    //Real kappa_p_test, kappa_r_test;
-    //combineopacity(1.0e-15, 1.0e6, kappa_r_test, kappa_p_test);
-    //printf("interpolated kappa_p:%g, kappa_r:%g\n", kappa_p_test, kappa_r_test);
-    
  
   }
 
@@ -518,10 +472,11 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
 }
 
 //density curvature refinement test
-int RefinementCondition3(MeshBlock *pmb){
+int RefinementCondition(MeshBlock *pmb){
   AthenaArray<Real> &w = pmb->phydro->w;
-  Real maxeps = 0.0;
-  Real min_r = 9999.0;
+  Real max_eps = 0.0;
+  Real min_r_to_inj = 9999.0;
+  Real min_r_to_bh = 9999.0;
   Real max_dens = 0.0;
 
   for (int k=pmb->ks; k<=pmb->ke; k++) {
@@ -530,13 +485,14 @@ int RefinementCondition3(MeshBlock *pmb){
 	Real epsr = (std::abs(w(IDN,k,j,i+1) - 2.0*w(IDN,k,j,i) + w(IDN,k,j,i-1))
 		     + std::abs(w(IDN,k,j+1,i) - 2.0*w(IDN,k,j,i) + w(IDN,k,j-1,i))
 		     + std::abs(w(IDN,k+1,j,i) - 2.0*w(IDN,k,j,i) + w(IDN,k-1,j,i)))/w(IDN,k,j,i);
-	Real dist_r = sqrt(SQR(pmb->pcoord->x1v(i)) + SQR(pmb->pcoord->x2v(j)) + SQR(pmb->pcoord->x3v(k)));
-	min_r = std::min(dist_r, min_r);
-	// Real epsp = (std::abs(w(IPR,k,j,i+1) - 2.0*w(IPR,k,j,i) + w(IPR,k,j,i-1))
-	//             + std::abs(w(IPR,k,j+1,i) - 2.0*w(IPR,k,j,i) + w(IPR,k,j-1,i)))
-	//             /w(IPR,k,j,i);
-	// Real eps = std::max(epsr, epsp);
-	maxeps = std::max(maxeps, epsr);
+	
+	Real dist_r_to_bh = sqrt(SQR(pmb->pcoord->x1v(i)) + SQR(pmb->pcoord->x2v(j)) + SQR(pmb->pcoord->x3v(k)));
+	Real dist_r_to_inj = sqrt(SQR(pmb->pcoord->x1v(i) - x_inj)
+				  + SQR(pmb->pcoord->x2v(j) - y_inj)
+				  + SQR(pmb->pcoord->x3v(k) - z_inj));
+	min_r_to_bh = std::min(dist_r_to_bh, min_r_to_bh);
+	min_r_to_inj = std::min(dist_r_to_inj, min_r_to_inj);
+	max_eps = std::max(max_eps, epsr);
 	max_dens = std::max(max_dens, w(IDN,k,j,i));
       }//i
     }//j
@@ -544,35 +500,21 @@ int RefinementCondition3(MeshBlock *pmb){
 
   //in the initialization step, the flag is based on coarse cell size
   int injection_flag = pmb->iuser_meshblock_data[0](0);
+  
   //after initialization, the injection grids are refined, refinement criterial should 
   //follow finer cell size, so switch to m_data(1)
-  if (pmb->pmy_mesh->ncycle>1) injection_flag = pmb->iuser_meshblock_data[0](1);
+  //if (pmb->pmy_mesh->ncycle>1) injection_flag = pmb->iuser_meshblock_data[0](1);
 
-  //if (injection_flag==1)
-  //printf("gid:%d, min_r:%g, maxdens:%g\n", pmb->gid, min_r, max_dens);
-
-  if ((maxeps>1.0 && max_dens>1.0e-3)||injection_flag ==1||min_r<3.0) return 1; //run to t=0.3
-  if (maxeps<1.0e-3) return -1;//run to t=0.3
+  //if ((maxeps>1.0 && max_dens>1.0e-3)||injection_flag ==1||min_r<3.0) return 1; //run to t=0.3
+  //if (maxeps<1.0e-3) return -1;//run to t=0.3
   
-  Real dis_z_l = std::fabs(pmb->pcoord->x2f(pmb->js) - PI/2.0);
-  Real dis_z_r = std::fabs(pmb->pcoord->x2f(pmb->je) - PI/2.0);
-  Real dis_z_min = std::min(dis_z_l, dis_z_r);
+  //Real dis_z_l = std::fabs(pmb->pcoord->x3f(pmb->ks) - 0.0);
+  //Real dis_z_r = std::fabs(pmb->pcoord->x3f(pmb->ke) - 0.0);
+  //Real dis_z_min = std::min(dis_z_l, dis_z_r);
 
-  //run to t=2.9
- // if ((maxeps>1.0 && max_dens>1.0e-5) && r_min>4.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<1.0e-4 || r_min<4.0) return -1; //run to t=3.0 for level=4 run
-
-  //run to t=3.3
-  //if ((maxeps>5.0 && max_dens>1.0e-3) && r_min>4.5 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.5 || r_min<4.0) return -1; //run to t=5.
-
-  //run to t=3.5
-  //if ((maxeps>10.0 && max_dens>1.0e-3) && r_min>4.5 && dis_th_min<0.088) return 1;
-  //if (maxeps<1.0 || r_min<4.0 || max_dens<5.0e-4) return -1; //run to t=1.9
-
-  //run to t=4.02
-  //if ((maxeps>1.0 && max_dens>5.0e-3) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.1 || r_min<4.8 || max_dens<1.0e-4) return -1; //run to t=5.
+  if ((min_r_to_bh < dis_to_bh) || (min_r_to_inj < dis_to_inj)) return 1;
+  if ((max_eps > dens_jump_refine) && (max_dens > dens_refine)) return 1;
+  if ((max_eps < dens_jump_derefine) || (max_dens < dens_derefine)) return -1;
 
   return 0;
 
