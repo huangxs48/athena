@@ -105,6 +105,12 @@ static Real rad_thresh, ph_thresh, th_thresh;
 static int blocksizex1_base, blocksizex2_base, blocksizex3_base;
 static Real delta_theta_base;
 static Real rad_coarse_thresh, ph_coarse_thresh, th_coarse_thresh;
+Real dens_jump_refine;
+Real dens_jump_derefine;
+Real dens_refine;
+Real dens_derefine;
+Real dis_to_bh;
+Real dis_to_inj;
 
 // User-defined boundary conditions for disk simulations
 void HydroInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,FaceField &b,
@@ -146,9 +152,6 @@ Real massfluxox1(MeshBlock *pmb, int iout);
 
 //AMR condition
 int RefinementCondition(MeshBlock *pmb);
-int RefinementCondition3(MeshBlock *pmb);
-Real orbit_fit_r(Real phi);
-Real orbit_fit_phi(Real r);
 
 //try small time step like rad
 Real RadTimeStep(MeshBlock *pmb);
@@ -234,6 +237,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   rad_inject = pin->GetOrAddReal("problem", "rad_inject", 400.0);
   phi_inject = pin->GetOrAddReal("problem", "phi_inj", 3.14);
   theta_inject = pin->GetOrAddReal("problem", "theta_inject", PI/2.0);
+  dens_jump_refine = pin->GetOrAddReal("problem", "dens_jump_refine", 1.0e6);
+  dens_jump_derefine = pin->GetOrAddReal("problem", "dens_jump_derefine", 1.0e-6);
+  dens_refine = pin->GetOrAddReal("problem", "dens_refine", 1.0e6);
+  dens_derefine = pin->GetOrAddReal("problem", "dens_derefine", 1.0e-6);
+  dis_to_bh = pin->GetOrAddReal("problem", "dis_to_bh", 1.0);
+  dis_to_inj = pin->GetOrAddReal("problem", "dis_to_inj", 1.0);
 
   //Initialize domain
   rho_init = pin->GetReal("problem", "rho_init");
@@ -268,7 +277,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // Enroll AMR
   if(adaptive==true)
-    EnrollUserRefinementCondition(RefinementCondition3);
+    EnrollUserRefinementCondition(RefinementCondition);
 
   //load mdot table
   mdot_table.NewAthenaArray(mdot_table_ng);//segment bounds for cubic spline fitting
@@ -483,13 +492,12 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
 }
 
 //density curvature refinement test
-int RefinementCondition3(MeshBlock *pmb){
+int RefinementCondition(MeshBlock *pmb){
   AthenaArray<Real> &w = pmb->phydro->w;
-  Real maxeps = 0.0;
-  Real max_r = 0.0;
-  Real max_th = 0.0;
-  Real max_ph = 0.0;
+  Real max_eps = 0.0;
   Real max_dens = 0.0;
+  Real min_r_to_inj = 9999.0;
+  Real min_r_to_bh = 9999.0;
   
   int current_level = pmb->pmy_mesh->get_current_level();//pmb->loc.level - pmb->pmy_mesh->root_level;
 
@@ -499,17 +507,24 @@ int RefinementCondition3(MeshBlock *pmb){
 	Real epsr = (std::abs(w(IDN,k,j,i+1) - 2.0*w(IDN,k,j,i) + w(IDN,k,j,i-1))
 		     + std::abs(w(IDN,k,j+1,i) - 2.0*w(IDN,k,j,i) + w(IDN,k,j-1,i))
 		     + std::abs(w(IDN,k+1,j,i) - 2.0*w(IDN,k,j,i) + w(IDN,k-1,j,i)))/w(IDN,k,j,i);
-	// Real epsp = (std::abs(w(IPR,k,j,i+1) - 2.0*w(IPR,k,j,i) + w(IPR,k,j,i-1))
-	//             + std::abs(w(IPR,k,j+1,i) - 2.0*w(IPR,k,j,i) + w(IPR,k,j-1,i)))
-	//             /w(IPR,k,j,i);
-	// Real eps = std::max(epsr, epsp);
-	if (epsr >= maxeps){
-	  max_r = pmb->pcoord->x1v(i);
-	  max_th = pmb->pcoord->x2v(j);
-	  max_ph = pmb->pcoord->x3v(k);
-	}
-	maxeps = std::max(maxeps, epsr);
+	max_eps = std::max(max_eps, epsr);
 	max_dens = std::max(max_dens, w(IDN,k,j,i));
+
+ 	Real r_inj = rad_inject;
+	Real ph_inj = phi_inject;
+	Real th_inj = theta_inject;
+	
+	Real r_coord = pmb->pcoord->x1v(i);
+	Real th_coord = pmb->pcoord->x2v(j);
+	Real ph_coord = pmb->pcoord->x3v(k);
+	
+	Real dist_r_to_inj = sqrt(r_coord * r_coord + r_inj * r_inj
+			   - 2.0 * r_coord * r_inj * (sin(th_coord) * sin(th_inj) * cos(ph_coord-ph_inj)
+			   + cos(th_coord)*cos(th_inj))); //spherical distance from injection point
+	
+	min_r_to_bh = std::min(r_coord, min_r_to_bh);
+	min_r_to_inj = std::min(dist_r_to_inj, min_r_to_inj);
+	
       }//i
     }//j
   }//k
@@ -519,76 +534,11 @@ int RefinementCondition3(MeshBlock *pmb){
   //after initialization, the injection grids are refined, refinement criterial should 
   //follow finer cell size, so switch to m_data(1)
   if (pmb->pmy_mesh->ncycle>1) injection_flag = pmb->iuser_meshblock_data[0](1);
-
-  //if (injection_flag==1)
-  //  printf("gid:%d, maxeps:%g, maxdens:%g, current level:%d, pmb->root:%d, pmb->cuurent:%d\n", pmb->gid, maxeps, max_dens, current_level, pmb->pmy_mesh->root_level, pmb->pmy_mesh->current_level);
-
-  if ((maxeps>1.0 && max_dens>1.0e-5)||injection_flag ==1) return 1; //run to t=0.3
-  if (maxeps<1.0e-3) return -1;//run to t=0.3
   
   Real r_min = pmb->pcoord->x1f(pmb->is);
   Real dis_th_l = std::fabs(pmb->pcoord->x2f(pmb->js) - PI/2.0);
   Real dis_th_r = std::fabs(pmb->pcoord->x2f(pmb->je) - PI/2.0);
   Real dis_th_min = std::min(dis_th_l, dis_th_r);
-
-  //run to t=2.9
- // if ((maxeps>1.0 && max_dens>1.0e-5) && r_min>4.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<1.0e-4 || r_min<4.0) return -1; //run to t=3.0 for level=4 run
-
-  //run to t=3.3
-  //if ((maxeps>5.0 && max_dens>1.0e-3) && r_min>4.5 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.5 || r_min<4.0) return -1; //run to t=5.
-
-  //run to t=3.5
-  //if ((maxeps>10.0 && max_dens>1.0e-3) && r_min>4.5 && dis_th_min<0.088) return 1;
-  //if (maxeps<1.0 || r_min<4.0 || max_dens<5.0e-4) return -1; //run to t=1.9
-
-  //run to t=4.02
-  //if ((maxeps>1.0 && max_dens>5.0e-3) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.1 || r_min<4.8 || max_dens<1.0e-4) return -1; //run to t=5.
-
-  //run to t=4.33
-  //if ((maxeps>1.0 && max_dens>5.0e-2) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.1 || r_min<4.8 || max_dens<1.0e-4) return -1; //run to t=5.
-
-  //run to t=4.7
-  //if ((maxeps>1.0 && max_dens>5.0e-2) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.1 || r_min<4.8 || max_dens<1.0e-3) return -1; //run to t=5.
-
-  //run to t=5.0
-  //if ((maxeps>0.1 && max_dens>1.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.01 || r_min<4.8 || max_dens<1.0e-3) return -1; //run to t=5.
-
-  //run to t-5.39
-  //if ((maxeps>0.1 && max_dens>2.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.01 || r_min<4.8 || max_dens<2.0e-3) return -1; //run to t=5.
-
-  //run to t=5.4
-  //if ((maxeps>0.1 && max_dens>3.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.01 || r_min<4.8 || max_dens<3.0e-3) return -1; //run to t=5
-
-  //run to t=5.87
-  //if ((maxeps>0.1 && max_dens>5.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.01 || r_min<4.8 || max_dens<4.0e-3) return -1; //run to t=5
-
-  //run to t=6.07
-  //if ((maxeps>0.2 && max_dens>6.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.02 || r_min<4.8 || max_dens<5.0e-3) return -1; //run to t=5
-
-  //run to t=6.42
-  //if ((maxeps>0.5 && max_dens>8.0e-1) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.05 || r_min<4.8 || max_dens<8.0e-3) return -1; 
-
-  //run to t=10.05
-  //if ((maxeps>1.0 && max_dens>1.0) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.05 || r_min<4.8 || max_dens<1.0e-2) return -1;
-
-  //if ((maxeps>5.0 && max_dens>3.0) && r_min>6.0 && dis_th_min<0.088) return 1;
-  //if (maxeps<0.05 || r_min<4.8 || max_dens<5.0e-2) return -1;
-
-  //only used in trying restart a .rst file with numlevel=6 -> numlevel=5
-  //if (pmb->pmy_mesh->current_level>8 && (maxeps>1.0 && max_dens>5.0e-4) && r_min>3.0 && dis_th_min<0.088) return -1;
-  //if (pmb->pmy_mesh->current_level>8) return -1;
   
    //return derefine to polar region?
   //distance to theta=0.0 for max/min theta of current meshblock
@@ -600,15 +550,14 @@ int RefinementCondition3(MeshBlock *pmb){
   Real dis_topole2_l = std::fabs(pmb->pcoord->x2f(pmb->js) - PI);
   Real dis_topole2_r = std::fabs(pmb->pcoord->x2f(pmb->je) - PI);
   Real dis_topole2_min = std::min(dis_topole2_l, dis_topole2_r);
-  
-  //PI/16.0 is a randomly choosed threshold, should test different values
-  //if ((dis_topole1_min<PI/16.0) || (dis_topole2_min<PI/16.0)){  //stay off the poles (>11deg)
-  if ((dis_topole1_min<delta_theta_base) || (dis_topole2_min<delta_theta_base)){  //stay off the poles (>11deg)
-    // Real current_level = pmb->current_level(gid);
-    // if current_level != root_level; return -1;
-    return 0; //-1
-  }
+ 
+  //stay off the poles (>11deg)
+  if ((dis_topole1_min<delta_theta_base) || (dis_topole2_min<delta_theta_base)) return 0; 
 
+  if ((min_r_to_bh < dis_to_bh) || (min_r_to_inj < dis_to_inj)) return 1;
+  if ((max_eps > dens_jump_refine) && (max_dens > dens_refine)) return 1;
+  if ((max_eps < dens_jump_derefine) || (max_dens < dens_derefine)) return -1;
+  
   return 0;
 
 }
