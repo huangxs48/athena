@@ -304,8 +304,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
 
   if (NR_RADIATION_ENABLED){
+    std::cout<<"here1"<<std::endl;
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
+      std::cout<<"here2"<<std::endl;
       EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
     }
     if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
@@ -495,9 +497,10 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
 int RefinementCondition(MeshBlock *pmb){
   AthenaArray<Real> &w = pmb->phydro->w;
   Real max_eps = 0.0;
+
   Real max_dens = 0.0;
   Real min_r_to_inj = 9999.0;
-  Real min_r_to_bh = 9999.0;
+  Real min_r_to_bh = pmb->pcoord->x1f(pmb->is);
   
   int current_level = pmb->pmy_mesh->get_current_level();//pmb->loc.level - pmb->pmy_mesh->root_level;
 
@@ -521,19 +524,19 @@ int RefinementCondition(MeshBlock *pmb){
 	Real dist_r_to_inj = sqrt(r_coord * r_coord + r_inj * r_inj
 			   - 2.0 * r_coord * r_inj * (sin(th_coord) * sin(th_inj) * cos(ph_coord-ph_inj)
 			   + cos(th_coord)*cos(th_inj))); //spherical distance from injection point
-	
-	min_r_to_bh = std::min(r_coord, min_r_to_bh);
+
 	min_r_to_inj = std::min(dist_r_to_inj, min_r_to_inj);
 	
       }//i
     }//j
   }//k
-
+  //printf("rank:%d, min_r_to_bh:%g, min_r_to_inj:%g, dis_to_bh:%g\n", Globals::my_rank, min_r_to_bh, min_r_to_inj, dis_to_bh);
+  
   //in the initialization step, the flag is based on coarse cell size
   int injection_flag = pmb->iuser_meshblock_data[0](0);
   //after initialization, the injection grids are refined, refinement criterial should 
   //follow finer cell size, so switch to m_data(1)
-  if (pmb->pmy_mesh->ncycle>1) injection_flag = pmb->iuser_meshblock_data[0](1);
+  //if (pmb->pmy_mesh->ncycle>1) injection_flag = pmb->iuser_meshblock_data[0](1);
   
   Real r_min = pmb->pcoord->x1f(pmb->is);
   Real dis_th_l = std::fabs(pmb->pcoord->x2f(pmb->js) - PI/2.0);
@@ -551,7 +554,6 @@ int RefinementCondition(MeshBlock *pmb){
   Real dis_topole2_r = std::fabs(pmb->pcoord->x2f(pmb->je) - PI);
   Real dis_topole2_min = std::min(dis_topole2_l, dis_topole2_r);
  
-  //stay off the poles (>11deg)
   if ((dis_topole1_min<delta_theta_base) || (dis_topole2_min<delta_theta_base)) return 0; 
 
   if ((min_r_to_bh < dis_to_bh) || (min_r_to_inj < dis_to_inj)) return 1;
