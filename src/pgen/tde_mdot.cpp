@@ -304,10 +304,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
 
   if (NR_RADIATION_ENABLED){
-    std::cout<<"here1"<<std::endl;
     //Enroll rad boundaries
     if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user")) {
-      std::cout<<"here2"<<std::endl;
       EnrollUserRadBoundaryFunction(BoundaryFace::inner_x1, RadInnerX1);
     }
     if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user")) {
